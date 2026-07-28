@@ -211,15 +211,23 @@ impl App {
 
 fn key_to_direction(k: &KeyCode) -> Option<Direction> {
     match k {
+        // vim cardinals
         KeyCode::Char('h') => Some(Direction::Left),
         KeyCode::Char('j') => Some(Direction::Down),
         KeyCode::Char('k') => Some(Direction::Up),
         KeyCode::Char('l') => Some(Direction::Right),
+        // yubn diagonals
         KeyCode::Char('y') => Some(Direction::UpLeft),
         KeyCode::Char('u') => Some(Direction::UpRight),
         KeyCode::Char('b') => Some(Direction::DownLeft),
         KeyCode::Char('n') => Some(Direction::DownRight),
-        KeyCode::Char('.') => Some(Direction::None), // wait
+        // arrow keys — 4-way only (no diagonal arrow on standard keyboards)
+        KeyCode::Left => Some(Direction::Left),
+        KeyCode::Right => Some(Direction::Right),
+        KeyCode::Up => Some(Direction::Up),
+        KeyCode::Down => Some(Direction::Down),
+        // wait
+        KeyCode::Char('.') => Some(Direction::None),
         _ => None,
     }
 }
@@ -355,9 +363,10 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("asciirogue — Korean-first TUI roguelike");
         eprintln!();
-        eprintln!("Keys (vim / yubn movement):");
-        eprintln!("  h j k l  — cardinal movement");
-        eprintln!("  y u b n  — diagonal movement");
+        eprintln!("Keys (vim / yubn / arrows):");
+        eprintln!("  h j k l  — cardinal movement (vim)");
+        eprintln!("  y u b n  — diagonal movement (yubn)");
+        eprintln!("  ← ↓ ↑ →  — cardinal movement (arrow keys)");
         eprintln!("  .        — wait one turn");
         eprintln!("  c        — clear vision memory");
         eprintln!("  r        — new random seed (regenerate dungeon)");
@@ -386,4 +395,44 @@ fn parse_seed(s: &str) -> Result<u64> {
         return u64::from_str_radix(rest, 16).with_context(|| format!("invalid hex seed: {s}"));
     }
     s.parse::<u64>().with_context(|| format!("invalid decimal seed: {s}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vim_keys_map_to_directions() {
+        assert_eq!(key_to_direction(&KeyCode::Char('h')), Some(Direction::Left));
+        assert_eq!(key_to_direction(&KeyCode::Char('j')), Some(Direction::Down));
+        assert_eq!(key_to_direction(&KeyCode::Char('k')), Some(Direction::Up));
+        assert_eq!(key_to_direction(&KeyCode::Char('l')), Some(Direction::Right));
+    }
+
+    #[test]
+    fn yubn_diagonals() {
+        assert_eq!(key_to_direction(&KeyCode::Char('y')), Some(Direction::UpLeft));
+        assert_eq!(key_to_direction(&KeyCode::Char('u')), Some(Direction::UpRight));
+        assert_eq!(key_to_direction(&KeyCode::Char('b')), Some(Direction::DownLeft));
+        assert_eq!(key_to_direction(&KeyCode::Char('n')), Some(Direction::DownRight));
+    }
+
+    #[test]
+    fn arrow_keys_map_to_cardinals() {
+        assert_eq!(key_to_direction(&KeyCode::Left), Some(Direction::Left));
+        assert_eq!(key_to_direction(&KeyCode::Right), Some(Direction::Right));
+        assert_eq!(key_to_direction(&KeyCode::Up), Some(Direction::Up));
+        assert_eq!(key_to_direction(&KeyCode::Down), Some(Direction::Down));
+    }
+
+    #[test]
+    fn wait_and_others() {
+        assert_eq!(key_to_direction(&KeyCode::Char('.')), Some(Direction::None));
+        // q / r / c / Esc are handled in App::handle directly — they don't map
+        // to a direction (key_to_direction returns None).
+        assert_eq!(key_to_direction(&KeyCode::Char('q')), None);
+        assert_eq!(key_to_direction(&KeyCode::Char('r')), None);
+        assert_eq!(key_to_direction(&KeyCode::Esc), None);
+        assert_eq!(key_to_direction(&KeyCode::Char(' ')), None);
+    }
 }

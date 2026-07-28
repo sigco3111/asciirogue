@@ -52,6 +52,7 @@ dependencies = [
 name = "asciirogue-core"
 version = "0.1.0"
 dependencies = [
+ "doryen-fov",
  "hecs",
  "serde",
 ]
@@ -72,6 +73,7 @@ dependencies = [
  "asciirogue-core",
  "asciirogue-procgen",
  "crossterm",
+ "hecs",
  "ratatui",
 ]
 
@@ -174,6 +176,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "doryen-fov"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a8e6ef8177b52d581c728655ff05fe03a6634ed496fc2c6642bb17b91d27aa9"
 
 [[package]]
 name = "either"

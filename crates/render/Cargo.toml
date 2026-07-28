@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 asciirogue-core = { path = "../core" }
 asciirogue-procgen = { path = "../procgen" }
+hecs = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

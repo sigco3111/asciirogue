@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 hecs = { workspace = true }
 serde = { workspace = true }
+doryen-fov = { workspace = true }

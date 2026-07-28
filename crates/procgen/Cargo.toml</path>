@@ -1,0 +1,10 @@
+[package]
+name = "asciirogue-procgen"
+description = "Procedural dungeon generation: BSP, room/corridor, point-in-room"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+asciirogue-core = { path = "../core" }
+serde = { workspace = true }

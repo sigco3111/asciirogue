@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/core",
+    "crates/procgen",
+    "crates/combat",
+    "crates/render",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+authors = ["Heejeong <sigco3111@example.com>"]
+license = "MIT"
+rust-version = "1.97"
+
+[workspace.dependencies]
+ratatui        = "0.29"
+crossterm      = "0.28"
+hecs           = "0.10"
+serde          = { version = "1", features = ["derive"] }
+ron            = "0.8"
+bracket-random = "0.8"
+anyhow         = "1"
+thiserror      = "1"
+serde_json     = "1"
+env_logger     = "0.11"
+log            = "0.4"

@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# env
+.env
+.env.local
+
+# savegames — local user data
+saves/
+*.save
+*.ron.save
+
+# logs
+*.log

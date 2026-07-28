@@ -1,0 +1,12 @@
+[package]
+name = "asciirogue-render"
+description = "Half-block TUI renderer for ratatui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+asciirogue-core = { path = "../core" }
+asciirogue-procgen = { path = "../procgen" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

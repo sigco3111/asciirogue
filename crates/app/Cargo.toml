@@ -1,0 +1,20 @@
+[package]
+name = "asciirogue"
+description = "Korean-first TUI roguelike with half-block visuals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "asciirogue"
+path = "src/main.rs"
+
+[dependencies]
+asciirogue-core = { path = "../core" }
+asciirogue-procgen = { path = "../procgen" }
+asciirogue-combat = { path = "../combat" }
+asciirogue-render = { path = "../render" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+anyhow = { workspace = true }
+hecs = { workspace = true }

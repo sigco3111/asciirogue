@@ -1,0 +1,10 @@
+[package]
+name = "asciirogue-core"
+description = "ECS components, world, common types (no rendering)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+hecs = { workspace = true }
+serde = { workspace = true }

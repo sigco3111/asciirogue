@@ -1,0 +1,137 @@
+//! Procedural dungeon generation for asciirogue.
+//!
+//! v0.1: simple BSP — split room rectangles recursively, connect via corridors.
+//! Future: hybrid with cellular automata, more variance, themed layers.
+
+#![deny(rust_2018_idioms)]
+
+use serde::{Deserialize, Serialize};
+
+pub mod bsp;
+
+/// A tile in the dungeon.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum Tile {
+    Wall,
+    Floor,
+    /// Impassable (boundary or pillar).
+    Rock,
+}
+
+impl Tile {
+    pub fn is_passable(self) -> bool {
+        matches!(self, Tile::Floor)
+    }
+}
+
+/// Axis-aligned rectangular room.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x1: i32,
+    pub y1: i32,
+    pub x2: i32,
+    pub y2: i32,
+}
+
+impl Rect {
+    pub fn new(x1: i32, y1: i32, x2: i32, y2: i32) -> Self {
+        debug_assert!(x1 <= x2 && y1 <= y2);
+        Self { x1, y1, x2, y2 }
+    }
+    pub fn width(&self) -> i32 {
+        self.x2 - self.x1 + 1
+    }
+    pub fn height(&self) -> i32 {
+        self.y2 - self.y1 + 1
+    }
+    pub fn center(&self) -> (i32, i32) {
+        ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
+    }
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x1 && x <= self.x2 && y >= self.y1 && y <= self.y2
+    }
+}
+
+/// A generated dungeon floor.
+#[derive(Clone, Debug)]
+pub struct Dungeon {
+    pub width: i32,
+    pub height: i32,
+    pub tiles: Vec<Tile>,
+    pub rooms: Vec<Rect>,
+}
+
+impl Dungeon {
+    /// Tile accessor.
+    pub fn at(&self, x: i32, y: i32) -> Tile {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return Tile::Rock;
+        }
+        self.tiles[(y as usize) * (self.width as usize) + (x as usize)]
+    }
+
+    /// Write a tile (used while building).
+    pub fn set(&mut self, x: i32, y: i32, t: Tile) {
+        if x >= 0 && y >= 0 && x < self.width && y < self.height {
+            self.tiles[(y as usize) * (self.width as usize) + (x as usize)] = t;
+        }
+    }
+
+    /// Carve a rectangular room (all floor, edge stays wall — the carving tool
+    /// turns inner area into Floor; outer one-tile border becomes Wall if
+    /// currently Rock).
+    pub fn carve_room(&mut self, r: Rect) {
+        for y in r.y1..=r.y2 {
+            for x in r.x1..=r.x2 {
+                let p = self.at(x, y);
+                let on_edge = x == r.x1 || y == r.y1 || x == r.x2 || y == r.y2;
+                match p {
+                    Tile::Rock if on_edge => self.set(x, y, Tile::Wall),
+                    _ => self.set(x, y, Tile::Floor),
+                }
+            }
+        }
+    }
+
+    /// Carve an L-shaped corridor between two centers.
+    pub fn carve_corridor(&mut self, ax: i32, ay: i32, bx: i32, by: i32) {
+        let (cx, cy) = (ax, by); // right-angle: go horizontal first then vertical
+        for x in ax.min(cx)..=ax.max(cx) {
+            self.set(x, ay, Tile::Floor);
+        }
+        for x in cx.min(bx)..=cx.max(bx) {
+            self.set(x, by, Tile::Floor);
+        }
+        for y in ay.min(by)..=ay.max(by) {
+            self.set(bx, y, Tile::Floor);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_basic() {
+        let r = Rect::new(2, 3, 7, 5);
+        assert_eq!(r.width(), 6);
+        assert_eq!(r.height(), 3);
+        assert_eq!(r.center(), (4, 4));
+        assert!(r.contains(4, 4));
+        assert!(!r.contains(1, 4));
+    }
+
+    #[test]
+    fn dungeon_bounds() {
+        let d = Dungeon {
+            width: 10,
+            height: 10,
+            tiles: vec![Tile::Rock; 100],
+            rooms: vec![],
+        };
+        assert_eq!(d.at(-1, 0), Tile::Rock);
+        assert_eq!(d.at(0, 10), Tile::Rock);
+        assert_eq!(d.at(0, 0), Tile::Rock);
+    }
+}

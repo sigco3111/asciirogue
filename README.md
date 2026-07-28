@@ -35,7 +35,9 @@ git clone https://github.com/sigco3111/asciirogue
 cd asciirogue
 cargo run                  # 메인 게임 (현재: BSP 던전 + 키바인딩 데모)
 cargo test                 # 8개 테스트
-cargo run --example dump -p asciirogue-procgen   # 헤드리스 던전 텍스트 덤프
+cargo run --release        # 최적화 빌드 (게임 루프 매끄러움)
+# TTY 없이 던전 미리보기:
+cargo run --release -- --dump --count 3 --seed 0xCAFE
 ```
 
 ### 모듈 구조
@@ -70,7 +72,7 @@ asciirogue/
 
 | 주차 | 목표 | 검증 |
 |---|---|---|
-| 1 | BSP 던전 + half-block wall_glyph ✅ | `cargo run --example dump` — 12룸 60×24 |
+| 1 | BSP 던전 + half-block wall_glyph ✅ | `cargo run --release -- --dump --count 3` — 12룸 60×24 |
 | 2 | ECS + 키바인딩 + FOV | 플레이어 이동 시 시야 토글 |
 | 3 | 적 AI + 전투 + HP/MP | 적 처치 |
 | 4 | 아이템/인벤 + 8층 + 보스 1 | 첫 보스 클리어 |

@@ -2,19 +2,16 @@
 
 use anyhow::{Context, Result};
 use asciirogue_procgen::{bsp, Dungeon};
-use asciirogue_render::draw_map;
+use asciirogue_render::{draw_map, wall_glyph};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::terminal::disable_raw_mode;
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::{DefaultTerminal, Terminal};
+use std::env;
 use std::io;
-use std::panic;
-use std::time::Duration;
 
 const MAP_W: i32 = 60;
 const MAP_H: i32 = 24;
@@ -84,13 +81,14 @@ fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         let mut app = App::new(0xCAFE_BABE_DEAD_BEEF);
-        // Use ratatui's convenience loop with crossterm backend.
-        let _tick = Duration::from_millis(100);
+        let tick = std::time::Duration::from_millis(100);
         while app.running {
             terminal.draw(|f| app.draw(f))?;
-            if crossterm::event::poll(Duration::from_millis(50))? {
+            if crossterm::event::poll(std::time::Duration::from_millis(50))? {
                 let ev = crossterm::event::read()?;
                 app.handle(&ev);
+            } else {
+                std::thread::sleep(tick);
             }
         }
         Ok(())
@@ -99,13 +97,74 @@ fn run() -> Result<()> {
     result
 }
 
+fn dump_to_stdout(seed: u64, count: u32) -> Result<()> {
+    for i in 0..count {
+        let s = seed.wrapping_add(i as u64);
+        let dungeon = bsp::generate(MAP_W, MAP_H, s, bsp::Config::default());
+        println!(
+            "── seed 0x{:016X}  {} rooms ─────────────────────────────────────────",
+            s,
+            dungeon.rooms.len()
+        );
+        for y in 0..MAP_H {
+            let mut line = String::with_capacity(MAP_W as usize + 16);
+            for x in 0..MAP_W {
+                line.push(match dungeon.at(x, y) {
+                    asciirogue_procgen::Tile::Wall => wall_glyph(&dungeon, x, y),
+                    asciirogue_procgen::Tile::Floor => '.',
+                    asciirogue_procgen::Tile::Rock => ' ',
+                });
+            }
+            println!("{}", line);
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
-    // Install a panic hook that restores the terminal before printing the panic.
-    let original = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
+    let args: Vec<String> = env::args().collect();
+    let dump_mode = args.iter().any(|a| a == "--dump");
+    if dump_mode {
+        let count: u32 = args
+            .windows(2)
+            .find(|w| w[0] == "--count")
+            .and_then(|w| w[1].parse().ok())
+            .unwrap_or(3);
+        let seed: u64 = args
+            .windows(2)
+            .find(|w| w[0] == "--seed")
+            .and_then(|w| parse_seed(&w[1]).ok())
+            .unwrap_or(0xCAFE_BABE_DEAD_BEEF);
+        return dump_to_stdout(seed, count);
+    }
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!("asciirogue — Korean-first TUI roguelike");
+        eprintln!();
+        eprintln!("Usage:");
+        eprintln!("  asciirogue              Launch the TUI (q / Esc to quit, r for new seed)");
+        eprintln!("  asciirogue --dump       Dump a few sample floors to stdout (no TTY required)");
+        eprintln!("  asciirogue --dump --count 5 --seed 1  Dump 5 floors with custom seed");
+        eprintln!("  asciirogue --help       Show this message");
+        return Ok(());
+    }
+
+    // panic hook — restore the terminal first, then print the panic.
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(io::stderr(), LeaveAlternateScreen);
         original(info);
     }));
     run().context("asciirogue runtime error")
+}
+
+fn parse_seed(s: &str) -> Result<u64> {
+    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return u64::from_str_radix(rest, 16)
+            .with_context(|| format!("invalid hex seed: {s}"));
+    }
+    s.parse::<u64>()
+        .with_context(|| format!("invalid decimal seed: {s}"))
 }

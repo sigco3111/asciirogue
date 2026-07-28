@@ -8,7 +8,7 @@
 
 use asciirogue_procgen::{Dungeon, Tile};
 use ratatui::style::Color;
-use ratatui::{Frame, buffer::Buffer};
+use ratatui::Frame;
 
 /// Wall glyph selector — 4-bit mask (N=1, S=2, W=4, E=8) → half-block char.
 ///

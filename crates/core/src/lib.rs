@@ -238,6 +238,124 @@ pub struct StatusEffects {
     pub bleed_turns: u8,
 }
 
+// ─── Items / inventory ────────────────────────────────────────────────────────
+
+/// Kind of item. v0.1 covers gold, potions, weapons, armor.
+/// v0.2+ will add enchantments and named relics.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ItemKind {
+    Coin,
+    HealthPotion,
+    ManaPotion,
+    Weapon,
+    Armor,
+}
+
+/// A single item lying on the ground or held by an entity.
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    /// Korean display name.
+    pub name: String,
+    /// Glyph used when on the ground.
+    pub glyph: char,
+    /// RGB pack for ground rendering.
+    pub fg_rgb: u32,
+    /// For weapons/armor this is the bonus to STR / CON.
+    pub bonus: i32,
+}
+
+impl Item {
+    pub fn gold(n: i32) -> Self {
+        Self { kind: ItemKind::Coin, name: format!("금화 {}", n), glyph: '$', fg_rgb: 0xFF_D2_46, bonus: n }
+    }
+    pub fn potion_hp() -> Self {
+        Self { kind: ItemKind::HealthPotion, name: "치유 물약".into(), glyph: '!', fg_rgb: 0x5A_DC_A0, bonus: 15 }
+    }
+    pub fn potion_mp() -> Self {
+        Self { kind: ItemKind::ManaPotion, name: "마나 물약".into(), glyph: '?', fg_rgb: 0x5A_9C_F0, bonus: 10 }
+    }
+    pub fn weapon(b: i32, name: &str) -> Self {
+        Self { kind: ItemKind::Weapon, name: name.into(), glyph: ')', fg_rgb: 0xC8_C8_C8, bonus: b }
+    }
+    pub fn armor(b: i32, name: &str) -> Self {
+        Self { kind: ItemKind::Armor, name: name.into(), glyph: '[', fg_rgb: 0xB8_B8_BC, bonus: b }
+    }
+}
+
+/// Inventory — fixed-size list of items. Empty slots hold None.
+#[derive(Clone, Debug, Default)]
+pub struct Inventory {
+    pub slots: Vec<Option<Item>>,
+    pub max: usize,
+}
+impl Inventory {
+    pub fn new(max: usize) -> Self {
+        Self { slots: vec![None; max], max }
+    }
+    /// Returns Ok(idx) on insert, Err(()) if full.
+    pub fn push(&mut self, item: Item) -> Result<usize, ()> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(item);
+                return Ok(i);
+            }
+        }
+        Err(())
+    }
+    pub fn take(&mut self, idx: usize) -> Option<Item> {
+        self.slots.get_mut(idx).and_then(|s| s.take())
+    }
+    pub fn is_empty(&self) -> bool {
+        self.slots.iter().all(|s| s.is_none())
+    }
+}
+
+/// Per-floor theme (SPEC §7 — 1~28층 환경).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum FloorTheme {
+    Cave,        // 1-4
+    Catacomb,    // 5-8
+    Garden,      // 9-12
+    Library,     // 13-16
+    Forge,       // 17-20
+    Temple,      // 21-24
+    FinalMaw,    // 25-27
+    Boss,        // 28
+}
+
+impl FloorTheme {
+    pub fn from_depth(depth: u32) -> Self {
+        match depth {
+            1..=4 => Self::Cave,
+            5..=8 => Self::Catacomb,
+            9..=12 => Self::Garden,
+            13..=16 => Self::Library,
+            17..=20 => Self::Forge,
+            21..=24 => Self::Temple,
+            25..=27 => Self::FinalMaw,
+            _ => Self::Boss,
+        }
+    }
+    /// Short display name (Korean first).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cave => "동굴",
+            Self::Catacomb => "카타콤",
+            Self::Garden => "정원",
+            Self::Library => "도서관",
+            Self::Forge => "대장간",
+            Self::Temple => "신전",
+            Self::FinalMaw => "심연",
+            Self::Boss => "쏠쏠리의 방",
+        }
+    }
+}
+
+/// Floor identifier: integer 1..=28.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct Floor(pub u32);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +406,36 @@ mod tests {
         assert_eq!(m.current, 2);
         assert!(!m.spend(5), "cannot spend more than current");
         assert_eq!(m.current, 2);
+    }
+
+    #[test]
+    fn inventory_round_trip() {
+        let mut inv = Inventory::new(4);
+        assert!(inv.is_empty());
+        assert_eq!(inv.push(Item::potion_hp()), Ok(0));
+        assert_eq!(inv.push(Item::potion_mp()), Ok(1));
+        assert_eq!(inv.push(Item::gold(15)), Ok(2));
+        // 4th slot filled:
+        assert_eq!(inv.push(Item::weapon(2, "단검")), Ok(3));
+        // 5th push should fail.
+        assert_eq!(inv.push(Item::potion_hp()), Err(()));
+        let it = inv.take(2).expect("gold slot");
+        assert_eq!(it.kind, ItemKind::Coin);
+        assert_eq!(it.bonus, 15);
+        assert!(inv.slots[2].is_none());
+        assert!(!inv.is_empty());
+        // Take all
+        for i in 0..4 {
+            inv.take(i);
+        }
+        assert!(inv.is_empty());
+    }
+
+    #[test]
+    fn floor_theme_mapping() {
+        assert_eq!(FloorTheme::from_depth(1), FloorTheme::Cave);
+        assert_eq!(FloorTheme::from_depth(4), FloorTheme::Cave);
+        assert_eq!(FloorTheme::from_depth(5), FloorTheme::Catacomb);
+        assert_eq!(FloorTheme::from_depth(28), FloorTheme::Boss);
     }
 }

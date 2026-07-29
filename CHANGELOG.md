@@ -5,6 +5,27 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.15 — Stairs "▼ 도착!" badge + 4-frame visibility
+
+- User verified (`~` debug warp) modal handler works correctly. The
+  modal popup itself is fine — the real issue is that the player
+  didn't notice they were 1 tile away from stairs (header showed
+  `stairs: → ▼ 1`). v0.5.15 makes the arrival hard to miss.
+- **New `at_stairs: bool` flag.** Set when the player steps onto a
+  StairsDown tile (or teleports via `~`). Cleared on y/n answer or
+  when the player walks off the stairs. Drives the header badge.
+- **Header badge "▼ 도착! (y/n)"** appears whenever `at_stairs` is
+  true. The player can never miss the prompt again.
+- **modal_redraws 2 → 4 frames.** The popup is visible for ~33ms
+  even at a typical 120 Hz render rate, well above the human
+  subliminal ~5ms threshold.
+- **4 new tests** in `at_stairs_tests`:
+  - `debug_warp_sets_at_stairs`
+  - `answering_y_clears_at_stairs`
+  - `answering_n_clears_at_stairs`
+  - `modal_redraws_is_four_frames`
+- Total: **73 passed / 0 failed**.
+
 ### v0.5.14 — Modal 1-frame guarantee + debug stairs warp
 
 - **Modal popup is now visible for at least one full frame.** The

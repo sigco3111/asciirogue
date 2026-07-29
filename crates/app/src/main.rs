@@ -68,6 +68,12 @@ struct App {
     /// (previously the modal could appear and disappear between two
     /// render calls without ever being visible).
     modal_redraws: u8,
+    /// v0.5.15: true when the player is standing on a StairsDown tile.
+    /// Set by try_player_act and the debug warp (~) key. Cleared on
+    /// descend (y/n) or when the player walks off the stairs. Drives
+    /// the header "▼ 도착!" badge so the player can never miss the
+    /// prompt again.
+    at_stairs: bool,
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -164,6 +170,7 @@ impl App {
             game_over: false,
             modal: ModalMode::Closed,
             modal_redraws: 0,
+            at_stairs: false,
         };
         app.recompute_fov();
         app
@@ -250,10 +257,12 @@ impl App {
                     match k.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                             self.modal = ModalMode::Closed;
+                            self.at_stairs = false;
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                             self.modal = ModalMode::Closed;
+                            self.at_stairs = false;
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                         }
                         _ => {}
@@ -316,7 +325,8 @@ impl App {
                             }
                             self.recompute_fov();
                             self.modal = ModalMode::ConfirmStairs;
-                            self.modal_redraws = 2;
+                            self.modal_redraws = 4;
+                            self.at_stairs = true;
                             self.log("▼ — 내려갈까? (y/n) [debug warp]");
                         }
                     }
@@ -453,7 +463,8 @@ impl App {
             && matches!(self.dungeon.at(next.0, next.1), Tile::StairsDown)
         {
             self.modal = ModalMode::ConfirmStairs;
-            self.modal_redraws = 2;
+            self.modal_redraws = 4;
+            self.at_stairs = true;
             self.log("▼ — 내려갈까? (y/n)");
         }
     }
@@ -885,8 +896,16 @@ impl App {
                 format!("stairs: {} {} {}  ", arrow, glyph, dist)
             })
             .unwrap_or_default();
+        // v0.5.15: a '▼ 도착!' badge when the player is standing on the
+        // stairs tile. Tells the player they answered (or haven't) yet so
+        // they don't walk off the stairs without seeing the modal.
+        let at_stairs_badge = if self.at_stairs {
+            " ▼ 도착! (y/n) "
+        } else {
+            ""
+        };
         let title = Paragraph::new(Span::from(format!(
-            "asciirogue — seed {}  {}  player ({},{})  visible {}  {}{}{}",
+            "asciirogue — seed {}  {}  player ({},{})  visible {}  {}{}{}{}",
             self.seed,
             self.floor_label(),
             player_pos.0,
@@ -894,6 +913,7 @@ impl App {
             visible_count,
             stairs_hint,
             pickup_hint,
+            at_stairs_badge,
             hp_mp
         )))
         .block({

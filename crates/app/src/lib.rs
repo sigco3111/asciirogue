@@ -68,6 +68,12 @@ pub struct App {
     /// (previously the modal could appear and disappear between two
     /// render calls without ever being visible).
     modal_redraws: u8,
+    /// v0.5.15: true when the player is standing on a StairsDown tile.
+    /// Set by try_player_act and the debug warp (~) key. Cleared on
+    /// descend (y/n) or when the player walks off the stairs. Drives
+    /// the header "▼ 도착!" badge so the player can never miss the
+    /// prompt again.
+    at_stairs: bool,
 }
 
 /// v0.5.7: Modal sub-modes. Currently only Inventory, but the enum keeps
@@ -174,6 +180,7 @@ impl App {
             game_over: false,
             modal: ModalMode::Closed,
             modal_redraws: 0,
+            at_stairs: false,
         };
         app.recompute_fov();
         app
@@ -238,10 +245,12 @@ impl App {
                         KeyCode::Char('y') | KeyCode::Char('Y')
                         | KeyCode::Enter => {
                             self.modal = ModalMode::Closed;
+                            self.at_stairs = false;
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                             self.modal = ModalMode::Closed;
+                            self.at_stairs = false;
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                         }
                         _ => {
@@ -306,7 +315,8 @@ impl App {
                             }
                             self.recompute_fov();
                             self.modal = ModalMode::ConfirmStairs;
-                            self.modal_redraws = 2;
+                            self.modal_redraws = 4;
+                            self.at_stairs = true;
                             self.log("▼ — 내려갈까? (y/n) [debug warp]");
                         }
                     }
@@ -416,11 +426,14 @@ impl App {
         // acted — the player can safely answer the prompt.
         // v0.5.14: also nudge modal_redraws so the popup is guaranteed one
         // full frame of visibility (vs. flashing for a sub-frame).
+        // v0.5.15: bump modar_redraws to 4 and set at_stairs so the header
+        // can show "▼ 도착!" badge even before the modal renders.
         if matches!(self.modal, ModalMode::Closed)
             && matches!(self.dungeon.at(next.0, next.1), Tile::StairsDown)
         {
             self.modal = ModalMode::ConfirmStairs;
-            self.modal_redraws = 2;
+            self.modal_redraws = 4;
+            self.at_stairs = true;
             self.log("▼ — 내려갈까? (y/n)");
         }
     }
@@ -2364,5 +2377,73 @@ mod modal_redraws_tests {
         assert!(app.modal_redraws > 0);
         app.handle(&char_event('n'));
         assert_eq!(app.modal_redraws, 0, "n must clear modal_redraws");
+    }
+}
+
+#[cfg(test)]
+mod at_stairs_tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn char_event(c: char) -> Event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn put_player_on_stairs(app: &mut App) -> (i32, i32) {
+        let last = app.dungeon.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
+        let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+        pos.0 = TilePos(sx, sy);
+        (sx, sy)
+    }
+
+    /// v0.5.15: arriving at stairs sets at_stairs=true.
+    #[test]
+    fn debug_warp_sets_at_stairs() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        assert!(!app.at_stairs, "fresh app should not be at_stairs");
+        app.handle(&char_event('~'));
+        assert!(app.at_stairs, "warp key should set at_stairs");
+    }
+
+    /// v0.5.15: answering y clears at_stairs (and descends).
+    #[test]
+    fn answering_y_clears_at_stairs() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        assert!(app.at_stairs);
+        app.handle(&char_event('y'));
+        assert!(!app.at_stairs, "y must clear at_stairs");
+    }
+
+    /// v0.5.15: answering n clears at_stairs (and stays on floor).
+    #[test]
+    fn answering_n_clears_at_stairs() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        assert!(app.at_stairs);
+        app.handle(&char_event('n'));
+        assert!(!app.at_stairs, "n must clear at_stairs");
+    }
+
+    /// v0.5.15: modal_redraws is bumped to 4 frames for stability.
+    #[test]
+    fn modal_redraws_is_four_frames() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        assert_eq!(
+            app.modal_redraws, 4,
+            "modal_redraws should be 4 to give the popup enough visibility"
+        );
     }
 }

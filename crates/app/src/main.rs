@@ -1,8 +1,10 @@
 //! asciirogue — Korean-first TUI roguelike with half-block visuals.
 
 use anyhow::{Context, Result};
+use asciirogue_combat::{attack, ai};
 use asciirogue_core::{
-    vision, Direction, Player, Position, Renderable, TilePos, Viewshed,
+    vision, Ai, AiKind, Direction, Health, Mana, Name, Player, Position, Renderable, Stats,
+    TilePos, Viewshed,
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
@@ -30,6 +32,10 @@ struct App {
     blocks: Vec<bool>,
     world: World,
     player: hecs::Entity,
+    /// Combat / event log (newest at back).
+    messages: Vec<String>,
+    /// Increments each tick to seed deterministic RNG.
+    tick: u64,
 }
 
 impl App {
@@ -48,16 +54,14 @@ impl App {
             Player,
             Renderable::new('@', 0xFF_D6_5A),
             Viewshed::new(VIEW_RADIUS, MAP_W, MAP_H),
+            Health::new(40),
+            Mana::new(10),
+            Stats::new(10, 10, 8, 8, 10),
         ));
 
-        // Spawn a marker enemy in another room for FOV sanity check.
-        if let Some(room) = dungeon.rooms.get(2) {
-            let (ex, ey) = room.center();
-            world.spawn((
-                Position(TilePos(ex, ey)),
-                Renderable::new('g', 0xB4_5A_D2),
-            ));
-        }
+        // Spawn a couple of rats in the second room, a goblin in the third.
+        spawn_enemy(&mut world, &dungeon, 1, 'r', "쥐", 8, Stats::new(3, 8, 1, 1, 5), 8, AiKind::Coward);
+        spawn_enemy(&mut world, &dungeon, 2, 'g', "고블린", 14, Stats::new(5, 6, 2, 2, 7), 8, AiKind::Chase);
 
         let blocks = build_blocks(&dungeon);
         let mut app = Self {
@@ -67,9 +71,19 @@ impl App {
             blocks,
             world,
             player,
+            messages: vec!["asciirogue v0.3 — h/j/k/l, arrows, yubn".to_string()],
+            tick: 0,
         };
         app.recompute_fov();
         app
+    }
+
+    fn log(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        if self.messages.len() >= 4 {
+            self.messages.remove(0);
+        }
+        self.messages.push(msg);
     }
 
     fn handle(&mut self, ev: &Event) {
@@ -91,7 +105,7 @@ impl App {
                     }
                     d if dir.is_some() => {
                         if let Some(dir) = dir {
-                            self.try_move(dir);
+                            self.try_player_act(dir);
                         }
                         let _ = d;
                     }
@@ -101,25 +115,161 @@ impl App {
         }
     }
 
-    /// Try to move the player in `dir`, blocked if next tile is non-Floor.
-    fn try_move(&mut self, dir: Direction) {
+    /// Player attempts to move or attack adjacent enemy.
+    fn try_player_act(&mut self, dir: Direction) {
+        let cur = match self.world.get::<&Position>(self.player) {
+            Ok(p) => p.0,
+            Err(_) => return,
+        };
         let (dx, dy) = dir.delta();
         if dx == 0 && dy == 0 {
+            // wait
+            self.tick = self.tick.wrapping_add(1);
+            self.enemy_take_turns();
             return;
         }
-        let cur = if let Ok(p) = self.world.get::<&Position>(self.player) {
-            p.0
-        } else {
-            return;
-        };
         let next = TilePos(cur.0 + dx, cur.1 + dy);
-        if !is_passable(&self.dungeon, next.0, next.1) {
+
+        // Enemy in next tile? Try to attack.
+        let target_entity = self.entity_at(next);
+        if let Some(entity) = target_entity {
+            self.player_attack(entity);
+            self.tick = self.tick.wrapping_add(1);
+            self.enemy_take_turns();
             return;
+        }
+
+        // Else try walking.
+        if !is_passable(&self.dungeon, next.0, next.1) {
+            return; // bump into wall — no turn consumed
         }
         if let Ok(mut p) = self.world.get::<&mut Position>(self.player) {
             p.0 = next;
         }
         self.recompute_fov();
+        self.tick = self.tick.wrapping_add(1);
+        self.enemy_take_turns();
+    }
+
+    fn entity_at(&self, pos: TilePos) -> Option<hecs::Entity> {
+        let mut found = None;
+        for (e, p) in self.world.query::<&Position>().iter() {
+            if p.0 == pos {
+                found = Some(e);
+                break;
+            }
+        }
+        found
+    }
+
+    fn player_attack(&mut self, target: hecs::Entity) {
+        // Need attacker stats, defender stats, and a pseudo-random d100.
+        let attacker_stats = match self.world.get::<&Stats>(self.player) {
+            Ok(s) => *s,
+            Err(_) => Stats::default(),
+        };
+        let target_stats = match self.world.get::<&Stats>(target) {
+            Ok(s) => *s,
+            Err(_) => Stats::default(),
+        };
+        let rng = ((self.tick as u32).wrapping_mul(2654435761)) >> 0;
+        let outcome = attack::resolve_attack(&attacker_stats, &target_stats, rng, 0);
+        if !outcome.hit {
+            self.log("빗나감!");
+            return;
+        }
+        let dealt = if let Ok(mut h) = self.world.get::<&mut Health>(target) {
+            h.take(outcome.dmg)
+        } else {
+            0
+        };
+        let crit_marker = if outcome.crit { "치명타! " } else { "" };
+        self.log(format!("{}{} 피해!", crit_marker, dealt));
+        // remove dead enemies
+        self.despawn_dead();
+    }
+
+    fn despawn_dead(&mut self) {
+        let dead: Vec<hecs::Entity> = self
+            .world
+            .query::<&Health>()
+            .iter()
+            .filter(|(_, h)| h.is_dead())
+            .map(|(e, _)| e)
+            .collect();
+        let count = dead.len();
+        for e in dead {
+            let _ = self.world.despawn(e);
+        }
+        if count > 0 {
+            self.log(format!("{} 처치!", count));
+        }
+    }
+
+    fn enemy_take_turns(&mut self) {
+        // Snapshot player position once.
+        let player_pos = match self.world.get::<&Position>(self.player) {
+            Ok(p) => p.0,
+            Err(_) => return,
+        };
+        // Iterate over all entities with Ai; for each, decide and act.
+        // We can't borrow world immutably while mutating, so collect (entity, pos, ai) tuples first.
+        let plan: Vec<(hecs::Entity, TilePos, Ai)> = self
+            .world
+            .query::<(&Position, &Ai)>()
+            .iter()
+            .map(|(e, (p, a))| (e, p.0, *a))
+            .collect();
+        for (entity, enemy_pos, ai_behav) in plan {
+            let action = ai::take_turn(
+                enemy_pos,
+                player_pos,
+                ai_behav.vision,
+                ai_behav.kind,
+                |x, y| is_passable(&self.dungeon, x, y)
+                    && self.entity_at(TilePos(x, y)).is_none(),
+            );
+            match action {
+                ai::AiAction::AttackPlayer => self.enemy_attack(entity),
+                ai::AiAction::Step(d) => {
+                    let (dx, dy) = d.delta();
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let np = TilePos(enemy_pos.0 + dx, enemy_pos.1 + dy);
+                    if is_passable(&self.dungeon, np.0, np.1)
+                        && self.entity_at(np).is_none()
+                    {
+                        if let Ok(mut p) = self.world.get::<&mut Position>(entity) {
+                            p.0 = np;
+                        }
+                    }
+                }
+                ai::AiAction::Wait | ai::AiAction::Idle => {}
+            }
+        }
+    }
+
+    fn enemy_attack(&mut self, attacker: hecs::Entity) {
+        let atk_stats = match self.world.get::<&Stats>(attacker) {
+            Ok(s) => *s,
+            Err(_) => Stats::default(),
+        };
+        let def_stats = match self.world.get::<&Stats>(self.player) {
+            Ok(s) => *s,
+            Err(_) => Stats::default(),
+        };
+        let rng = ((self.tick as u32).wrapping_mul(2654435761)) ^ 0xDEAD_BEEF;
+        let outcome = attack::resolve_attack(&atk_stats, &def_stats, rng, 0);
+        if !outcome.hit {
+            self.log("적이 빗나감.");
+            return;
+        }
+        if let Ok(mut h) = self.world.get::<&mut Health>(self.player) {
+            h.take(outcome.dmg);
+        }
+        let crit = if outcome.crit { " (치명타!)" } else { "" };
+        self.log(format!("적 명중! {} 피해{}", outcome.dmg, crit));
     }
 
     fn recompute_fov(&mut self) {
@@ -152,9 +302,12 @@ impl App {
 
     fn draw(&self, frame: &mut ratatui::Frame) {
         let area = frame.area();
-        let chunks =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-                .split(area);
+        let chunks = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(area);
 
         // Header.
         let player_pos = if let Ok(p) = self.world.get::<&Position>(self.player) {
@@ -167,11 +320,19 @@ impl App {
         } else {
             0
         };
+        let hp_mp = if let (Ok(h), Ok(m)) = (
+            self.world.get::<&Health>(self.player),
+            self.world.get::<&Mana>(self.player),
+        ) {
+            format!("HP {}/{}  MP {}/{}", h.current, h.max, m.current, m.max)
+        } else {
+            String::from("?")
+        };
         let title = Paragraph::new(Span::from(format!(
-            "asciirogue — seed {}  player ({},{})  visible {}  h/j/k/l or yubn to move  q quit  r new seed  c clear vision",
-            self.seed, player_pos.0, player_pos.1, visible_count
+            "asciirogue — seed {}  player ({},{})  visible {}  {}",
+            self.seed, player_pos.0, player_pos.1, visible_count, hp_mp
         )))
-        .block(Block::default().borders(Borders::ALL));
+        .block(Block::default().borders(Borders::ALL).title(" asciirogue "));
         frame.render_widget(title, chunks[0]);
 
         // Map area, centred.
@@ -197,15 +358,53 @@ impl App {
         };
         draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot);
 
-        // Status bar.
+        // Footer — last few messages + control hint.
+        let recent = self
+            .messages
+            .iter()
+            .rev()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("  |  ");
         let status = Paragraph::new(Span::from(format!(
-            "rooms {} | size {}x{} | seed {} | move keys hjklyubn",
+            "[{}]  rooms {}  size {}x{}  hjklyubn/arrows move  . wait  q quit  r new",
+            recent,
             self.dungeon.rooms.len(),
             self.dungeon.width,
             self.dungeon.height,
-            self.seed,
-        )));
+        )))
+        .block(Block::default().borders(Borders::ALL));
         frame.render_widget(status, chunks[2]);
+    }
+}
+
+fn spawn_enemy(
+    world: &mut World,
+    dungeon: &Dungeon,
+    room_idx: usize,
+    glyph: char,
+    name: &str,
+    hp: i32,
+    stats: Stats,
+    vision: i32,
+    kind: AiKind,
+) {
+    if let Some(room) = dungeon.rooms.get(room_idx) {
+        let (ex, ey) = room.center();
+        let fg = match glyph {
+            'r' => 0xE6_82_82u32, // pink rat
+            'g' => 0xB4_5A_D2u32, // magenta goblin
+            _ => 0xFF_FF_FFu32,
+        };
+        world.spawn((
+            Position(TilePos(ex, ey)),
+            Renderable::new(glyph, fg),
+            Health::new(hp),
+            stats,
+            Ai::new(kind, 100, vision),
+            Name(name.to_string()),
+        ));
     }
 }
 

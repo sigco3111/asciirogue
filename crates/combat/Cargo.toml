@@ -1,6 +1,6 @@
 [package]
 name = "asciirogue-combat"
-description = "Combat system: energy queue, hit/dodge, status effects"
+description = "Combat system: attack / hit / damage / status / AI tick"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 asciirogue-core = { path = "../core" }
 serde = { workspace = true }
+

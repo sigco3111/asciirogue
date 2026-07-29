@@ -134,6 +134,110 @@ impl Viewshed {
     }
 }
 
+// ─── Combat / stats ───────────────────────────────────────────────────────────
+
+/// Hit points. Current goes to 0 → entity despawned.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Health {
+    pub current: i32,
+    pub max: i32,
+}
+impl Health {
+    pub fn new(max: i32) -> Self {
+        Self { current: max, max }
+    }
+    pub fn is_dead(&self) -> bool {
+        self.current <= 0
+    }
+    pub fn take(&mut self, dmg: i32) -> i32 {
+        let dealt = dmg.max(0).min(self.current);
+        self.current -= dealt;
+        dealt
+    }
+}
+
+/// Mana (magic resource).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Mana {
+    pub current: i32,
+    pub max: i32,
+}
+impl Mana {
+    pub fn new(max: i32) -> Self {
+        Self { current: max, max }
+    }
+    pub fn spend(&mut self, cost: i32) -> bool {
+        if self.current >= cost {
+            self.current -= cost;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Base stats — derive from class/race and grow with level-ups.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Stats {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub intellect: i32,
+    pub wisdom: i32,
+    pub constitution: i32,
+}
+impl Stats {
+    pub const fn new(s: i32, d: i32, i: i32, w: i32, c: i32) -> Self {
+        Self { strength: s, dexterity: d, intellect: i, wisdom: w, constitution: c }
+    }
+}
+
+impl Energy {
+    pub fn gain(&mut self, by: i32) {
+        self.0 = (self.0 + by).max(0);
+    }
+    pub fn spend_turn(&mut self) {
+        self.0 = (self.0 - ENERGY_PER_TURN).max(0);
+    }
+}
+
+/// Marker: this entity can take its own turn (moves / attacks).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AiKind {
+    /// BFS pathfind toward player.
+    Chase,
+    /// Like Chase but flees when HP low.
+    Coward,
+    /// Patrol until player in FOV, then chase.
+    PatrolThenChase,
+}
+
+/// AI behaviour attached to an enemy. The actual decision (which step to take)
+/// lives in `combat::ai::run_ai`.
+#[derive(Copy, Clone, Debug)]
+pub struct Ai {
+    pub kind: AiKind,
+    pub speed: i32, // energy gained per tick (player = 100/turn)
+    pub vision: i32,
+}
+impl Ai {
+    pub const fn new(kind: AiKind, speed: i32, vision: i32) -> Self {
+        Self { kind, speed, vision }
+    }
+}
+
+/// Display name (Korean-first).
+#[derive(Clone, Debug)]
+pub struct Name(pub String);
+
+/// Composite status effects on an entity. Each counter is "turns remaining".
+#[derive(Copy, Clone, Debug, Default)]
+pub struct StatusEffects {
+    pub poison_turns: u8,
+    pub burn_turns: u8,
+    pub slow_turns: u8,
+    pub bleed_turns: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +269,24 @@ mod tests {
         let r = Renderable::new('@', 0xFFD65A);
         assert_eq!(r.glyph, '@');
         assert_eq!(r.fg_rgb, 0xFFD65A);
+    }
+
+    #[test]
+    fn health_dies_at_zero() {
+        let mut h = Health::new(10);
+        assert!(!h.is_dead());
+        assert_eq!(h.take(3), 3);
+        assert_eq!(h.current, 7);
+        assert_eq!(h.take(100), 7, "cannot over-damage; capped at current");
+        assert!(h.is_dead());
+    }
+
+    #[test]
+    fn mana_spend_respects_pool() {
+        let mut m = Mana::new(5);
+        assert!(m.spend(3));
+        assert_eq!(m.current, 2);
+        assert!(!m.spend(5), "cannot spend more than current");
+        assert_eq!(m.current, 2);
     }
 }

@@ -252,8 +252,12 @@ impl App {
                 // y / Enter descend, n / Esc cancel; everything else ignored.
                 // v0.5.14: clear modal_redraws so the popup is not redrawn
                 // after the player has answered (prevents "ghost popup").
+                // v0.5.17: simplified modal handler. Always log to confirm
+                // the branch was reached (debug aid; helps user verify
+                // whether the modal handler is being entered at all).
                 if matches!(self.modal, ModalMode::ConfirmStairs) {
                     self.modal_redraws = 0;
+                    self.log(format!("[modal] key={:?}", k.code));
                     match k.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                             self.modal = ModalMode::Closed;
@@ -261,14 +265,9 @@ impl App {
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            // v0.5.16: n/Esc cancels, but if the player is
-                            // still standing on the stairs tile, re-show
-                            // the modal so they can answer again. Recovery
-                            // UX for pressing n by mistake.
                             self.modal = ModalMode::Closed;
-                            let player_pos = self.world.get::<&Position>(self.player).ok().map(|p| p.0);
-                            let on_stairs = player_pos
-                                .map(|p| matches!(self.dungeon.at(p.0, p.1), Tile::StairsDown))
+                            let on_stairs = self.world.get::<&Position>(self.player)
+                                .map(|p| matches!(self.dungeon.at(p.0.0, p.0.1), Tile::StairsDown))
                                 .unwrap_or(false);
                             if on_stairs {
                                 self.modal = ModalMode::ConfirmStairs;

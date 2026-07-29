@@ -5,6 +5,22 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.17 — Modal handler debug log
+
+User still reports modal interaction failing. Compared to $ (pickup)
+and ? (help) which work: those handlers are simple `match k.code` blocks
+without nested let-bindings. The modal handler had nested borrowing
+(Ref + dungeon.at) which may have been making the borrow checker
+complain in a way that surfaced as silent non-match.
+
+v0.5.17 simplifies the modal handler:
+- Single `match k.code` block with explicit y/n/Esc/Enter arms.
+- Always log `[modal] key={:?}` so the user can verify the branch
+  is reached. If the log appears, the modal handler is firing. If it
+  doesn't, the modal state is being cleared before the key arrives.
+- The recovery UX (n → re-trigger if still on stairs) is preserved.
+- Total: **76 passed / 0 failed**.
+
 ### v0.5.16 — n-cancel recovery: re-show modal when still on stairs
 
 User scenario: arrived at stairs, modal opened, pressed `n` to cancel,

@@ -5,6 +5,21 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.13 — Stairs modal restyled + help text uniformity
+
+- **Modal popup is now unmistakable.** The v0.5.11 popup was a 40×5
+  plain box that was easy to miss when the dungeon behind it was busy.
+  v0.5.13 widens it to 60% of the screen width, raises it to 7 rows,
+  colors the border and title yellow, and renders **two `Clear` passes**
+  (full screen + popup region) so the popup stands out cleanly even on
+  top of bright terrain.
+- **Help text consistency.** v0.5.11 removed the `>` shortcut but left
+  `> descend` strings in several places (startup message, status bar
+  controls hint, `?` help burst, `--help` CLI output). All of these
+  now say `stairs: y/n` (ko) / `stairs: y/n` (en) to match the modal
+  keymap.
+- Total: **66 passed / 0 failed**.
+
 ### v0.5.12 — Stairs tile is never blocked on spawn
 
 - **Boss repositioned off the stairs.** On BOSS_FLOOR the boss used to

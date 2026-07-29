@@ -1746,7 +1746,7 @@ pub fn run_main() -> anyhow::Result<()> {
         eprintln!("  R        — restart the run from floor 1");
         eprintln!("  g        — pick up item under player");
         eprintln!("  i        — use first available potion");
-        eprintln!("  >        — descend (after defeating the floor's boss)");
+        eprintln!("  >        — auto-popup on stairs: y to descend, n to cancel (after defeating the floor's boss)");
         eprintln!("  ?        — show help lines");
         eprintln!("  S        — save meta (Soul Remembrance) to disk");
         eprintln!("  L        — toggle locale (ko / en)");

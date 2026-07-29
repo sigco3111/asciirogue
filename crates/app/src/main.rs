@@ -927,9 +927,9 @@ impl App {
             .collect::<Vec<_>>()
             .join("  |  ");
         let controls_hint = if self.boss_defeated && self.floor == BOSS_FLOOR {
-            "g pick  i inv  p potion  > descend  R restart"
+            "g pick  i inv  p potion  stairs: y/n  R restart"
         } else {
-            "g pick  i inv  p potion  > descend  q quit  R restart"
+            "g pick  i inv  p potion  stairs: y/n  q quit  R restart"
         };
         let status = Paragraph::new(Span::from(format!(
             "[{}]  rooms {}  {}\n{}",
@@ -952,58 +952,67 @@ impl App {
     }
 
     /// v0.5.11: popup asking for descent confirmation. Renders on top of
-    /// the world map. Pressed key handled by `handle()`.
+    /// the world map. Pressed key handled by `handle()`. v0.5.13: widened
+    /// and restyled with a yellow highlight so the popup is unmistakable
+    /// in the middle of gameplay (previously a 40x5 plain box that was
+    /// easy to miss when the dungeon behind it was busy).
     fn draw_confirm_stairs_modal(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        use ratatui::layout::{Constraint, Direction, Layout};
-        use ratatui::style::{Modifier, Style};
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-        use ratatui::layout::Rect;
 
-        // Center a 40-wide, 5-tall box on the screen.
-        let popup_w = 40u16.min(area.width.saturating_sub(2));
-        let popup_h = 5u16;
+        // Bigger, wider popup: 60% of width, 7 rows tall. Minimum 36x5 so
+        // it stays readable on smaller terminals.
+        let popup_w = (area.width * 60 / 100).max(36).min(area.width.saturating_sub(2));
+        let popup_h = 7u16.min(area.height.saturating_sub(2));
         let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
         let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
         let popup: Rect = Rect::new(x, y, popup_w, popup_h);
 
+        // First clear the entire screen so the popup stands out cleanly.
+        frame.render_widget(Clear, area);
+        // Then clear the popup region (in case the Clear above left artifacts).
         frame.render_widget(Clear, popup);
+
+        let title_text = match self.locale {
+            Locale::Korean => "▼ 내려가기 확인",
+            Locale::English => "▼ Descend confirm",
+        };
         let block = Block::default()
             .title(Span::styled(
-                i18n::t_for(I18nKey::UiDescend, self.locale),
-                Style::default().add_modifier(Modifier::BOLD),
+                title_text,
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ))
-            .borders(Borders::ALL);
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // prompt
-                Constraint::Length(1), // spacer
-                Constraint::Length(1), // controls
-            ])
-            .split(inner);
         let prompt = i18n::t_for(I18nKey::MsgStairConfirm, self.locale);
-        let (y_label, n_label) = match self.locale {
-            Locale::Korean => ("[y] 예", "[n/Enter] 취소"),
-            Locale::English => ("[y] yes", "[n/Enter] cancel"),
+        let (y_label, y_hint, n_label) = match self.locale {
+            Locale::Korean => ("[y] 예 — 다음 층으로", "[Y]", "[n] 취소 — 머무름"),
+            Locale::English => ("[y] yes — descend", "[Y]", "[n] cancel — stay"),
+        };
+        let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let grey = Style::default().fg(Color::Gray);
+        let prompt_styled = match self.locale {
+            Locale::Korean => format!("{}  {}", prompt, y_hint),
+            Locale::English => format!("{}  {}", prompt, y_hint),
         };
         let lines = vec![
-            Line::from(prompt),
+            Line::from(""),
+            Line::from(Span::styled(prompt_styled, yellow)),
             Line::from(""),
             Line::from(vec![
-                Span::styled(y_label, Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("   "),
-                Span::raw(n_label),
+                Span::styled(y_label, yellow),
+                Span::raw("    "),
+                Span::styled(n_label, grey),
             ]),
+            Line::from(""),
         ];
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(p, inner);
-        // (No need to use the chunks layout above; just keep the reference
-        // for future split if more lines are added.)
-        let _ = chunks;
     }
 
     /// v0.5.7: centered modal with the player's inventory. 8-slot grid on
@@ -1676,7 +1685,7 @@ fn main() -> Result<()> {
         eprintln!("  R        — restart the run from floor 1");
         eprintln!("  g / $    — pick up item under player (alias for $ on a $ glyph)");
         eprintln!("  i        — use first available potion");
-        eprintln!("  >        — descend (after defeating the floor's boss)");
+        eprintln!("  >        — auto-popup on stairs: y to descend, n to cancel (after defeating the floor's boss)");
         eprintln!("  ?        — show help lines (key list, also in Korean)");
         eprintln!("  S        — save meta (Soul Remembrance) to disk");
         eprintln!("  L        — toggle locale (ko / en)");

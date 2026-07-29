@@ -341,6 +341,16 @@ impl App {
             Ok(s) => *s,
             Err(_) => Stats::default(),
         };
+        // If the target is already dead, skip the message (despawn_dead will
+        // emit the "x 처치!" announcement separately).
+        let already_dead = self
+            .world
+            .get::<&Health>(target)
+            .map(|h| h.is_dead())
+            .unwrap_or(true);
+        if already_dead {
+            return;
+        }
         let rng = ((self.tick as u32).wrapping_mul(2654435761)) >> 0;
         let outcome = attack::resolve_attack(&attacker_stats, &target_stats, rng, 0);
         if !outcome.hit {
@@ -352,6 +362,12 @@ impl App {
         } else {
             0
         };
+        if dealt == 0 {
+            // Target had < 1 HP from a previous strike this turn; let
+            // despawn_dead report the kill instead of printing "0 피해!".
+            self.despawn_dead();
+            return;
+        }
         let crit_marker = if outcome.crit { "치명타! " } else { "" };
         self.log(format!("{}{} 피해!", crit_marker, dealt));
         // remove dead enemies

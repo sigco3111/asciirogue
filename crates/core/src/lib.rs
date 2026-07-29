@@ -214,16 +214,25 @@ pub enum AiKind {
 }
 
 /// AI behaviour attached to an enemy. The actual decision (which step to take)
-/// lives in `combat::ai::run_ai`.
-#[derive(Copy, Clone, Debug)]
+/// lives in `combat::ai::take_turn`.
+#[derive(Clone, Debug)]
 pub struct Ai {
     pub kind: AiKind,
     pub speed: i32, // energy gained per tick (player = 100/turn)
     pub vision: i32,
+    /// Last known player position. Updated when the enemy "sees" the player.
+    /// `None` while patrol / unaware.
+    pub last_known_player: Option<TilePos>,
 }
+
 impl Ai {
     pub const fn new(kind: AiKind, speed: i32, vision: i32) -> Self {
-        Self { kind, speed, vision }
+        Self {
+            kind,
+            speed,
+            vision,
+            last_known_player: None,
+        }
     }
 }
 

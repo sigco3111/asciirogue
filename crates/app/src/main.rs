@@ -23,7 +23,11 @@ use std::io;
 
 const MAP_W: i32 = 60;
 const MAP_H: i32 = 24;
-const VIEW_RADIUS: i32 = 8;
+/// Sight radius in tiles. Lower values mean the player has to actively seek
+/// encounters instead of being sniped from across a corridor. Tightened
+/// from 8 → 5 in v0.5.1 after play-testing revealed enemies chased the
+/// player before they were ever visible.
+const VIEW_RADIUS: i32 = 5;
 
 /// Game state — BSP dungeon + ECS world + cached viewshed.
 struct App {
@@ -48,6 +52,10 @@ struct App {
     remembrance: SoulRemembrance,
     /// Gold the player is carrying right now (collected from coin drops).
     gold: u32,
+    /// True when the player has hit 0 HP. The game loop refuses all input
+    /// except `R` (restart) and `q` (quit) until the user starts a new run.
+    /// Saved-state dumps via `--dump` can still inspect the floor.
+    game_over: bool,
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -140,6 +148,7 @@ impl App {
             locale,
             remembrance,
             gold: carried_gold,
+            game_over: false,
         };
         app.recompute_fov();
         app
@@ -161,6 +170,21 @@ impl App {
         if let Event::Key(k) = ev {
             if k.kind == KeyEventKind::Press {
                 let dir = key_to_direction(&k.code);
+                // When dead, only R (restart) or q (quit) do anything.
+                if self.game_over {
+                    match k.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                            self.running = false;
+                        }
+                        KeyCode::Char('R') => {
+                            let rem = self.remembrance.clone();
+                            let locale = self.locale;
+                            *self = App::new_at_with(self.seed, 1, rem, locale, 0);
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                         self.running = false;
@@ -376,8 +400,12 @@ impl App {
             .get::<&Health>(self.player)
             .map(|h| h.is_dead())
             .unwrap_or(false);
-        if player_died {
-            self.log("쓰러졌습니다… (R 새 게임)".to_string());
+        if player_died && !self.game_over {
+            self.game_over = true;
+            // Clear queue, push a single announcement that is hard to miss.
+            self.messages.clear();
+            self.messages.push("═══ 쓰러졌습니다… ═══".to_string());
+            self.messages.push("R = 새 게임, q = 종료".to_string());
         }
     }
 
@@ -388,21 +416,50 @@ impl App {
             Err(_) => return,
         };
         // Iterate over all entities with Ai; for each, decide and act.
-        // We can't borrow world immutably while mutating, so collect (entity, pos, ai) tuples first.
+        // Snapshot every enemy with Ai. We can't borrow world immutably while
+        // mutating, so collect tuples first.
         let plan: Vec<(hecs::Entity, TilePos, Ai)> = self
             .world
             .query::<(&Position, &Ai)>()
             .iter()
-            .map(|(e, (p, a))| (e, p.0, *a))
+            .map(|(e, (p, a))| (e, p.0, a.clone()))
             .collect();
+        // For each enemy, compute fresh sight info and decide an action.
+        // The sight_blocks closure answers "does this tile block LOS for the
+        // enemy?" using the same dungeon passability that the player's FOV
+        // uses. We also refresh Ai.last_known_player based on what the enemy
+        // sees *now* (Chebyshev ≤ vision AND no wall between).
         for (entity, enemy_pos, ai_behav) in plan {
+            let blocks = &self.blocks; // borrow
+            let sight_blocks = |x: i32, y: i32| {
+                let idx = ((y * self.dungeon.width) + x) as usize;
+                idx < blocks.len() && blocks[idx]
+            };
+            let can_see_player_now = {
+                let dx = (player_pos.0 - enemy_pos.0).abs();
+                let dy = (player_pos.1 - enemy_pos.1).abs();
+                dx.max(dy) <= ai_behav.vision
+                    && los_clear(enemy_pos, player_pos, sight_blocks)
+            };
+            // Update last_known_player whenever the enemy sees the player.
+            if can_see_player_now {
+                if let Ok(mut ai) = self.world.get::<&mut Ai>(entity) {
+                    ai.last_known_player = Some(player_pos);
+                }
+            }
             let action = ai::take_turn(
                 enemy_pos,
                 player_pos,
                 ai_behav.vision,
                 ai_behav.kind,
+                if can_see_player_now {
+                    Some(player_pos)
+                } else {
+                    ai_behav.last_known_player
+                },
                 |x, y| is_passable(&self.dungeon, x, y)
                     && self.entity_at(TilePos(x, y)).is_none(),
+                sight_blocks,
             );
             match action {
                 ai::AiAction::AttackPlayer => self.enemy_attack(entity),
@@ -512,7 +569,15 @@ impl App {
             visible_count,
             hp_mp
         )))
-        .block(Block::default().borders(Borders::ALL).title(" asciirogue "));
+        .block({
+            let mut b = Block::default().borders(Borders::ALL);
+            if self.game_over {
+                b = b.title(" ☠ YOU DIED ☠ ");
+            } else {
+                b = b.title(" asciirogue ");
+            }
+            b
+        });
         frame.render_widget(title, chunks[0]);
 
         // Map area, centred.
@@ -916,6 +981,26 @@ fn build_blocks(d: &Dungeon) -> Vec<bool> {
     (0..w * h)
         .map(|i| !matches!(d.tiles[i], Tile::Floor))
         .collect()
+}
+
+/// Cheap line-of-sight: walks from `a` toward `b` step by step, returning
+/// false if any intermediate tile is sight-blocking or out of bounds.
+fn los_clear(a: TilePos, b: TilePos, sight_blocks: impl Fn(i32, i32) -> bool) -> bool {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let dist = dx.abs().max(dy.abs());
+    if dist == 0 {
+        return true;
+    }
+    for i in 1..dist {
+        let t = i as f32 / dist as f32;
+        let px = a.0 + (dx as f32 * t).round() as i32;
+        let py = a.1 + (dy as f32 * t).round() as i32;
+        if sight_blocks(px, py) {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_passable(d: &Dungeon, x: i32, y: i32) -> bool {

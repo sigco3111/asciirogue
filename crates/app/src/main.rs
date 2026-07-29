@@ -136,8 +136,8 @@ impl App {
             "{} — {}",
             t_format_with_locale(I18nKey::MsgFloorEntered, locale, &startup_args),
             match locale {
-                Locale::Korean => "h/j/k/l, 화살표, yubn, i 인벤토리, p 포션, > 내려가기",
-                Locale::English => "h/j/k/l, arrows, yubn, i inv, p potion, > to descend",
+                Locale::Korean => "h/j/k/l, 화살표, yubn, i 인벤토리, p 포션, 계단에서 y/n",
+                Locale::English => "h/j/k/l, arrows, yubn, i inv, p potion, y/n on stairs",
             }
         );
 
@@ -234,6 +234,22 @@ impl App {
                     }
                     return;
                 }
+                // v0.5.11: stairs confirm modal owns input while open.
+                // y / Enter descend, n / Esc cancel; everything else ignored.
+                if matches!(self.modal, ModalMode::ConfirmStairs) {
+                    match k.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            self.modal = ModalMode::Closed;
+                            self.descend_internal();
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            self.modal = ModalMode::Closed;
+                            self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                         self.running = false;
@@ -266,7 +282,7 @@ impl App {
                     KeyCode::Char('?') => {
                         // In-screen help (one message burst).
                         self.log("h/j/k/l 이동 | yubn 대각 | 화살표 이동".to_string());
-                        self.log("g 줍기 | i 인벤토리 | p 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
+                        self.log("g 줍기 | i 인벤토리 | p 포션 | R 새 게임 | q 종료".to_string());
                         self.log("S 영혼 저장 | L 언어 토글 | ? 도움말".to_string());
                     }
                     KeyCode::Char('r') => {
@@ -329,30 +345,6 @@ impl App {
                             self.log(msg);
                         } else {
                             self.log("사용할 물약이 없습니다.");
-                        }
-                    }
-                    KeyCode::Char('>') => {
-                        let next_floor = self.floor + 1;
-                        if self.floor == BOSS_FLOOR && !self.boss_defeated {
-                            self.log("보스를 먼저 처치하세요.");
-                        } else if next_floor > MAX_FLOORS {
-                            self.log("이미 던전 끝에 도달했습니다.");
-                            // Final-floor cleared: end-of-run rewards.
-                            self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
-                            let _ = save_remembrance(&self.remembrance);
-                            self.log(format!(
-                                "쏠쏠리의 방 클리어! clears={}, soul_wisps={}",
-                                self.remembrance.clears,
-                                self.remembrance.wisps,
-                            ));
-                        } else {
-                            // Mid-run descent — keep gold + remembrance.
-                            let rem = self.remembrance.clone();
-                            let locale = self.locale;
-                            let gold = self.gold;
-                            let seed_save = self.seed;
-                            *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
-                            self.log(format!("{}층으로 내려갑니다.", next_floor));
                         }
                     }
                     d if dir.is_some() => {
@@ -427,6 +419,41 @@ impl App {
         }
         self.tick = self.tick.wrapping_add(1);
         self.enemy_take_turns();
+        // v0.5.11: walking onto a StairsDown tile pops the descent confirm.
+        if matches!(self.modal, ModalMode::Closed)
+            && matches!(self.dungeon.at(next.0, next.1), Tile::StairsDown)
+        {
+            self.modal = ModalMode::ConfirmStairs;
+        }
+    }
+
+    /// v0.5.11: descend to the next floor from a StairsDown tile. Caller
+    /// is responsible for setting `modal = ModalMode::Closed` first.
+    fn descend_internal(&mut self) {
+        let next_floor = self.floor + 1;
+        if self.floor == BOSS_FLOOR && !self.boss_defeated {
+            self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
+            return;
+        }
+        if next_floor > MAX_FLOORS {
+            self.log(i18n::t_for(I18nKey::MsgAlreadyAtBottom, self.locale));
+            self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
+            let _ = save_remembrance(&self.remembrance);
+            self.log(format!(
+                "쏠쏠리의 방 클리어! clears={}, soul_wisps={}",
+                self.remembrance.clears,
+                self.remembrance.wisps,
+            ));
+            return;
+        }
+        let args: [&dyn std::fmt::Display; 1] = [&next_floor as &dyn std::fmt::Display];
+        let msg = t_format_with_locale(I18nKey::MsgStairDescendOk, self.locale, &args);
+        let rem = self.remembrance.clone();
+        let locale = self.locale;
+        let gold = self.gold;
+        let seed_save = self.seed;
+        *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
+        self.log(msg);
     }
 
     /// v0.5.7: dispatch one inventory-modal key. Mutates `self.modal`.
@@ -918,6 +945,65 @@ impl App {
         if let ModalMode::Inventory { cursor } = self.modal {
             self.draw_inventory_modal(frame, area, cursor);
         }
+        // v0.5.11: stairs confirm modal — small centered popup.
+        if matches!(self.modal, ModalMode::ConfirmStairs) {
+            self.draw_confirm_stairs_modal(frame, area);
+        }
+    }
+
+    /// v0.5.11: popup asking for descent confirmation. Renders on top of
+    /// the world map. Pressed key handled by `handle()`.
+    fn draw_confirm_stairs_modal(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use ratatui::layout::{Constraint, Direction, Layout};
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+        use ratatui::layout::Rect;
+
+        // Center a 40-wide, 5-tall box on the screen.
+        let popup_w = 40u16.min(area.width.saturating_sub(2));
+        let popup_h = 5u16;
+        let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+        let popup: Rect = Rect::new(x, y, popup_w, popup_h);
+
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(Span::styled(
+                i18n::t_for(I18nKey::UiDescend, self.locale),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL);
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // prompt
+                Constraint::Length(1), // spacer
+                Constraint::Length(1), // controls
+            ])
+            .split(inner);
+        let prompt = i18n::t_for(I18nKey::MsgStairConfirm, self.locale);
+        let (y_label, n_label) = match self.locale {
+            Locale::Korean => ("[y] 예", "[n/Enter] 취소"),
+            Locale::English => ("[y] yes", "[n/Enter] cancel"),
+        };
+        let lines = vec![
+            Line::from(prompt),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(y_label, Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("   "),
+                Span::raw(n_label),
+            ]),
+        ];
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(p, inner);
+        // (No need to use the chunks layout above; just keep the reference
+        // for future split if more lines are added.)
+        let _ = chunks;
     }
 
     /// v0.5.7: centered modal with the player's inventory. 8-slot grid on

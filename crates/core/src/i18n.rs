@@ -41,6 +41,9 @@ pub enum Key {
     MsgMenuLoad,
     MsgMenuHelp,
     MsgStairs,
+    MsgStairConfirm,
+    MsgStairDescendOk,
+    MsgStairCancel,
     MsgDeath,
 }
 
@@ -63,6 +66,9 @@ const TABLE: &[(Key, &str, &str)] = &[
     (Key::MsgMenuLoad, "이어하기", "Continue"),
     (Key::MsgMenuHelp, "도움말", "Help"),
     (Key::MsgStairs, "주위에 계단이 없습니다.", "There are no stairs here."),
+    (Key::MsgStairConfirm, "▼ 다음 층으로 내려갈까?", "▼ Descend to the next floor?"),
+    (Key::MsgStairDescendOk, "{}층으로 내려갑니다.", "Descending to F{}."),
+    (Key::MsgStairCancel, "취소했습니다.", "Cancelled."),
     (Key::MsgDeath, "쓰러졌습니다…", "You died…"),
 ];
 

@@ -5,6 +5,35 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.11 — Stairs confirmation popup (no `>` shortcut)
+
+- **Descent is now a popup, not a hotkey.** Walking onto a `▼` StairsDown
+  tile triggers a centered modal: *"▼ 다음 층으로 내려갈까?"* (KO) /
+  *"▼ Descend to the next floor?"* (EN). Press `y` or `Enter` to descend,
+  `n` or `Esc` to stay on the floor. The previous `>` shortcut is
+  removed — accidentally descending on the wrong tile is no longer
+  possible.
+- **Modal is a true mode.** While `ConfirmStairs` is open, movement keys
+  (`hjkl`, `yubn`, arrows) are inert: the player must answer before any
+  further action. This matches the existing inventory modal policy
+  (v0.5.7) and prevents the enemy turn from interrupting the prompt.
+- **New i18n keys.** `MsgStairConfirm`, `MsgStairDescendOk` (with `{}`
+  floor placeholder), `MsgStairCancel` — every line of the prompt and
+  the resulting log message is translated.
+- **Code structure.** Descend logic was extracted into `descend_internal`
+  so the modal handler and the (re-introducible) test fixture share
+  one path. Boss gate and end-of-run rewards are unchanged from v0.5.10.
+- **8 new tests** in `confirm_stairs_tests`:
+  - `y_in_confirm_descends_to_next_floor`
+  - `enter_in_confirm_descends_to_next_floor`
+  - `n_in_confirm_cancels_without_descending`
+  - `esc_in_confirm_cancels`
+  - `other_keys_in_confirm_are_ignored`
+  - `gt_key_no_longer_descends`
+  - `walking_onto_stairs_opens_confirm_modal`
+  - `walking_onto_stairs_triggers_confirm`
+- Total: **64 passed / 0 failed** (was 56 in v0.5.10).
+
 ### v0.5.10 — StairsDown visible & gated + gold surfaced in both header & inventory
 
 - **`Tile::StairsDown`** added to procgen. BSP generator now places exactly

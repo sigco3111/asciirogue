@@ -1136,10 +1136,10 @@ fn main() -> Result<()> {
         eprintln!("  c        — clear vision memory");
         eprintln!("  r        — new random seed (regenerate current floor)");
         eprintln!("  R        — restart the run from floor 1");
-        eprintln!("  g        — pick up item under player");
+        eprintln!("  g / $    — pick up item under player (alias for $ on a $ glyph)");
         eprintln!("  i        — use first available potion");
         eprintln!("  >        — descend (after defeating the floor's boss)");
-        eprintln!("  ?        — show help lines");
+        eprintln!("  ?        — show help lines (key list, also in Korean)");
         eprintln!("  S        — save meta (Soul Remembrance) to disk");
         eprintln!("  L        — toggle locale (ko / en)");
         eprintln!("  q / Esc  — quit");

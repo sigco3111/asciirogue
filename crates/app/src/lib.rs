@@ -217,7 +217,7 @@ impl App {
                     KeyCode::Char('?') => {
                         // In-screen help (one message burst).
                         self.log("h/j/k/l 이동 | yubn 대각 | 화살표 이동".to_string());
-                        self.log("g 줍기 | i 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
+                        self.log("g/$ 줍기 | i 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
                         self.log("S 영혼 저장 | L 언어 토글 | ? 도움말".to_string());
                     }
                     KeyCode::Char('r') => {
@@ -234,7 +234,10 @@ impl App {
                             v.revealed.iter_mut().for_each(|r| *r = false);
                         }
                     }
-                    KeyCode::Char('g') | KeyCode::Char('G') => {
+                    KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
+                        // `g` is the documented pickup key; `$` (gold sign) and
+                        // `,` are intuitive aliases the player will reach
+                        // for when they see a $ glyph.
                         if try_pickup(&mut self.world, self.player) {
                             self.log("아이템을 주웠습니다.");
                         } else {

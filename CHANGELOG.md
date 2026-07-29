@@ -5,6 +5,37 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.18 — Drop v0.5.16 recovery UX (infinite-modal trap)
+
+User feedback: "▼에 접근해도 모달은 호출되지 않음. (이전과 같은 생태)"
+and walkthrough shows the modal is reachable only via the `~` debug
+warp, then `n` cancels but the modal comes back on the next frame
+because v0.5.16's recovery UX re-triggers the modal when the player
+is still on the stairs tile. The player then can't move at all because
+the modal handler swallows every non-y/n key.
+
+Diagnosis:
+- `~` works → modal handler is fine
+- `y` / `Enter` works → descend_internal works
+- `n` works → modal closes (one frame)
+- v0.5.16's "n on stairs → re-trigger" then reopens the modal
+- After n, modal = ConfirmStairs → all other keys are ignored
+- Player is stuck on the stairs tile with no way to move off
+- They walk off? They can't: the modal swallows the move key first.
+
+v0.5.18 removes the recovery UX entirely. After n/Esc:
+- modal = Closed
+- at_stairs = false
+- The player can move freely. If they want to descend again, they
+  walk off and back on (or press `~`).
+
+Updated 2 tests in modal_recovery_tests and at_stairs_tests to
+expect the new v0.5.18 behavior (modal closes, at_stairs cleared).
+Added 2 new tests in v0_5_18_no_recovery_tests:
+  - n_closes_modal_even_when_on_stairs
+  - nondescend_keys_are_not_swallowed_after_n
+- Total: **78 passed / 0 failed**.
+
 ### v0.5.17 — Modal handler debug log
 
 User still reports modal interaction failing. Compared to $ (pickup)

@@ -265,17 +265,13 @@ impl App {
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            // v0.5.18: n/Esc just closes the modal. We do
+                            // NOT re-trigger even if the player is still
+                            // on the stairs tile — v0.5.16's recovery UX
+                            // created an infinite-modal trap (every key
+                            // other than y/n was ignored while on stairs).
                             self.modal = ModalMode::Closed;
-                            let on_stairs = self.world.get::<&Position>(self.player)
-                                .map(|p| matches!(self.dungeon.at(p.0.0, p.0.1), Tile::StairsDown))
-                                .unwrap_or(false);
-                            if on_stairs {
-                                self.modal = ModalMode::ConfirmStairs;
-                                self.modal_redraws = 4;
-                                self.at_stairs = true;
-                            } else {
-                                self.at_stairs = false;
-                            }
+                            self.at_stairs = false;
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                         }
                         _ => {}

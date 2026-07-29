@@ -252,17 +252,13 @@ impl App {
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            // v0.5.18: n/Esc just closes the modal. We do
+                            // NOT re-trigger even if the player is still
+                            // on the stairs tile — v0.5.16's recovery UX
+                            // created an infinite-modal trap (every key
+                            // other than y/n was ignored while on stairs).
                             self.modal = ModalMode::Closed;
-                            let on_stairs = self.world.get::<&Position>(self.player)
-                                .map(|p| matches!(self.dungeon.at(p.0.0, p.0.1), Tile::StairsDown))
-                                .unwrap_or(false);
-                            if on_stairs {
-                                self.modal = ModalMode::ConfirmStairs;
-                                self.modal_redraws = 4;
-                                self.at_stairs = true;
-                            } else {
-                                self.at_stairs = false;
-                            }
+                            self.at_stairs = false;
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                         }
                         _ => {
@@ -2461,20 +2457,19 @@ mod at_stairs_tests {
         assert!(!app.at_stairs, "y must clear at_stairs");
     }
 
-    /// v0.5.15: n clears at_stairs only if the player is OFF the stairs.
-    /// v0.5.16: if the player is still on the stairs, n re-triggers the
-    /// modal and keeps at_stairs true (recovery UX).
+    /// v0.5.18: n clears at_stairs (and closes the modal) even when
+    /// the player is still on the stairs tile. Reverses v0.5.16's
+    /// recovery UX.
     #[test]
-    fn answering_n_keeps_at_stairs_when_on_stairs() {
+    fn answering_n_clears_at_stairs_even_on_stairs() {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
         app.handle(&char_event('~'));
         assert!(app.at_stairs);
         app.handle(&char_event('n'));
-        // Still on stairs → v0.5.16 keeps at_stairs true.
-        assert!(app.at_stairs, "n must keep at_stairs when on stairs");
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
-            "n must re-trigger modal when still on stairs");
+        assert!(!app.at_stairs, "v0.5.18: n must clear at_stairs even on stairs");
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close modal even on stairs");
     }
 
     /// v0.5.16: n clears at_stairs when the player has walked off the
@@ -2534,22 +2529,20 @@ mod modal_recovery_tests {
         (sx, sy)
     }
 
-    /// v0.5.16: pressing n while standing on the stairs should NOT leave
-    /// the modal closed. The modal should re-show so the player can answer
-    /// again. This is the recovery UX for pressing n by mistake.
+    /// v0.5.18: pressing n while standing on the stairs DOES close the
+    /// modal. Reverses v0.5.16's recovery UX which caused an infinite-
+    /// modal trap (every input other than y/n was ignored).
     #[test]
-    fn n_while_on_stairs_reopens_modal() {
+    fn n_while_on_stairs_closes_modal_v0_5_18() {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
-        // Trigger the modal via debug warp.
         app.handle(&char_event('~'));
         assert!(matches!(app.modal, ModalMode::ConfirmStairs));
-        // Cancel with n.
         app.handle(&char_event('n'));
-        // v0.5.16: should re-trigger the modal since player is still on stairs.
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
-            "n while on stairs should re-trigger the modal");
-        assert!(app.at_stairs, "at_stairs should still be true");
+        // v0.5.18: modal closes, at_stairs cleared.
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close the modal even on stairs");
+        assert!(!app.at_stairs, "at_stairs should be cleared");
     }
 
     /// v0.5.16: after answering y, the player descends — modal closes
@@ -2562,5 +2555,74 @@ mod modal_recovery_tests {
         app.handle(&char_event('y'));
         assert!(matches!(app.modal, ModalMode::Closed));
         assert!(!app.at_stairs);
+    }
+}
+
+#[cfg(test)]
+mod v0_5_18_no_recovery_tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn char_event(c: char) -> Event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn put_player_on_stairs(app: &mut App) -> (i32, i32) {
+        let last = app.dungeon.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
+        let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+        pos.0 = TilePos(sx, sy);
+        (sx, sy)
+    }
+
+    /// v0.5.18: n no longer re-triggers the modal even when the player
+    /// is still on the stairs. Reverses v0.5.16's recovery UX, which
+    /// created an infinite-modal trap (all non-y/n keys were ignored
+    /// while on stairs, so the player could not move at all after n).
+    #[test]
+    fn n_closes_modal_even_when_on_stairs() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        app.handle(&char_event('n'));
+        // v0.5.18: modal closes, at_stairs cleared, even though we are
+        // still on the stairs tile.
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close the modal even on stairs");
+        assert!(!app.at_stairs,
+            "v0.5.18: at_stairs must be cleared after n");
+    }
+
+    /// v0.5.18: after n, the player can move freely (hjkl etc.) because
+    /// the modal is closed and no longer trapping input.
+    #[test]
+    fn nondescend_keys_are_not_swallowed_after_n() {
+        // v0.5.18: after n, the modal is closed and at_stairs is cleared.
+        // The player can press any key (movement, help, etc.) without
+        // being trapped by the modal. We don't assert that the player
+        // actually moves (because that depends on enemy positions), only
+        // that the modal state lets subsequent keys be processed normally.
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        app.handle(&char_event('n'));
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close modal");
+        assert!(!app.at_stairs, "v0.5.18: at_stairs must clear");
+        // Now press a key that the main match should handle (h = left).
+        // We don't assert position change here because enemy AI might
+        // interfere, but the modal handler should NOT be entered again.
+        let before_modal = app.modal;
+        app.handle(&char_event('h'));
+        assert_eq!(before_modal, app.modal,
+            "modal state should not change after n and a non-modal key");
     }
 }

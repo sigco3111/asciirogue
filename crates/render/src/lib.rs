@@ -174,6 +174,7 @@ mod tests {
             height: 5,
             tiles: vec![Tile::Floor; 25],
             rooms: vec![],
+            stairs: None,
         };
         // No walls, every neighbor returns false.
         assert_eq!(wall_glyph(&d, 2, 2), ' ');
@@ -201,6 +202,7 @@ mod tests {
             height: 5,
             tiles: vec![Tile::Floor; 25],
             rooms: vec![],
+            stairs: None,
         };
 
         let mut world = World::new();

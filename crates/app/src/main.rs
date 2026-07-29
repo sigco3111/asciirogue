@@ -1223,7 +1223,20 @@ fn spawn_enemy(
     kind: AiKind,
 ) {
     if let Some(room) = dungeon.rooms.get(room_idx) {
-        let (ex, ey) = room.center();
+        // v0.5.12: if the room center is the stairs tile, nudge to a
+        // neighbor so the spawn never sits on the descent.
+        let (cx, cy) = room.center();
+        let (ex, ey) = match dungeon.stairs {
+            Some(s) if (s.0, s.1) == (cx, cy) => {
+                let offsets = [(0,1), (1,0), (0,-1), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)];
+                offsets
+                    .iter()
+                    .map(|&(dx, dy)| (cx + dx, cy + dy))
+                    .find(|&(x, y)| room.contains(x, y))
+                    .unwrap_or((cx, cy))
+            }
+            _ => (cx, cy),
+        };
         let fg = match glyph {
             'r' => 0xE6_82_82u32, // pink rat
             'g' => 0xB4_5A_D2u32, // magenta goblin
@@ -1246,14 +1259,25 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
     let scale = floor as i32; // 1..=8
 
     // Spawn 2 standard enemies per floor (in non-boss floors) + 1 boss on BOSS_FLOOR.
+    // v0.5.12: avoid placing rats/goblins/bears on the last room so the
+    // stairs tile is never blocked by an enemy.
     let room_count = dungeon.rooms.len();
+    let last_room_idx = room_count.saturating_sub(1);
+    let safe_room = |idx: usize| -> usize {
+        let picked = idx.min(room_count.saturating_sub(1));
+        if picked == last_room_idx && last_room_idx > 0 {
+            last_room_idx.saturating_sub(1)
+        } else {
+            picked
+        }
+    };
     if room_count >= 3 {
         let mut idx = 1_usize;
         // Tier 1: a rat in room[1] (always available, weakest).
         spawn_enemy(
             world,
             dungeon,
-            idx.min(room_count - 1),
+            safe_room(idx),
             'r',
             "쥐",
             6 + scale,
@@ -1280,7 +1304,7 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
         spawn_enemy(
             world,
             dungeon,
-            idx.min(room_count - 1),
+            safe_room(idx),
             glyph2,
             name2,
             14 + scale * 2,
@@ -1294,7 +1318,7 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
         spawn_enemy(
             world,
             dungeon,
-            3_usize.min(room_count - 1),
+            safe_room(3),
             'B',
             "곰",
             28 + scale * 2,
@@ -1304,10 +1328,22 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
         );
     }
 
-    // Boss on BOSS_FLOOR.
+    // Boss on BOSS_FLOOR. v0.5.12: spawn on a tile adjacent to the stairs
+    // so the boss does not occupy the descent itself.
     if floor == BOSS_FLOOR {
         if let Some(room) = dungeon.rooms.last() {
-            let (bx, by) = room.center();
+            let (cx, cy) = room.center();
+            let (sx, sy) = dungeon.stairs.map(|p| (p.0, p.1)).unwrap_or((cx, cy));
+            let (bx, by) = if (sx, sy) == (cx, cy) {
+                let offsets = [(0,1), (1,0), (0,-1), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)];
+                offsets
+                    .iter()
+                    .map(|&(dx, dy)| (cx + dx, cy + dy))
+                    .find(|&(x, y)| room.contains(x, y))
+                    .unwrap_or((cx, cy))
+            } else {
+                (cx, cy)
+            };
             world.spawn((
                 Position(TilePos(bx, by)),
                 Renderable::new('D', 0xFF_FF_40),
@@ -1327,9 +1363,16 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
         if i % 2 == 0 {
             continue;
         }
-        // Pick a free tile within the room.
-        let cx = ((room.x1 + room.x2) / 2).max(room.x1 + 1);
-        let cy = ((room.y1 + room.y2) / 2).max(room.y1 + 1);
+        // Pick a free tile within the room. v0.5.12: nudge off the stairs
+        // tile if the room center happens to be the descent.
+        let cx_center = (room.x1 + room.x2) / 2;
+        let cy_center = (room.y1 + room.y2) / 2;
+        let (cx, cy) = match dungeon.stairs {
+            Some(s) if (s.0, s.1) == (cx_center, cy_center) => (cx_center + 1, cy_center),
+            _ => (cx_center, cy_center),
+        };
+        let cx = cx.max(room.x1 + 1).min(room.x2 - 1);
+        let cy = cy.max(room.y1 + 1).min(room.y2 - 1);
         let item = match (floor + i as u32) % 4 {
             0 => Item::gold(10 + scale * 4),
             1 => Item::potion_hp(),

@@ -4,6 +4,7 @@
 
 #![deny(rust_2018_idioms)]
 
+use asciirogue_core::TilePos;
 use serde::{Deserialize, Serialize};
 
 pub mod bsp;
@@ -62,6 +63,11 @@ pub struct Dungeon {
     pub height: i32,
     pub tiles: Vec<Tile>,
     pub rooms: Vec<Rect>,
+    /// v0.5.12: location of the StairsDown tile, if any. `None` for floors
+    /// that don't generate a descent (e.g. the bottom of a finite run).
+    /// Populated by `bsp::generate`. Useful for callers that need to avoid
+    /// spawning enemies or loot on top of the stairs.
+    pub stairs: Option<TilePos>,
 }
 
 impl Dungeon {
@@ -123,6 +129,7 @@ mod tests {
             height: 10,
             tiles: vec![Tile::Rock; 100],
             rooms: vec![],
+            stairs: None,
         };
         assert_eq!(d.at(-1, 0), Tile::Rock);
         assert_eq!(d.at(0, 10), Tile::Rock);

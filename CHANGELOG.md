@@ -5,6 +5,30 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.12 — Stairs tile is never blocked on spawn
+
+- **Boss repositioned off the stairs.** On BOSS_FLOOR the boss used to
+  spawn at `rooms.last().center()` — exactly the same tile as the
+  descent. The player could not walk onto ▼ until the boss was killed,
+  and the layout felt like the stairs symbol was "under" the boss. The
+  boss now spawns on a tile adjacent to the stairs inside the last room,
+  so the descent is visible from the doorway.
+- **Rat/goblin/bear no longer placed on the last room.** Small dungeons
+  (rooms ≤ 3) used to land rats and goblins on the stairs tile via
+  `idx.min(room_count-1)`. We now back off to the penultimate room when
+  the chosen index would otherwise equal the last room index.
+- **spawn_enemy nudges off the stairs.** If a room's center is the
+  stairs tile for any other reason (e.g. a future 2-room minimum), the
+  spawn walks the 8 neighbours until it finds a non-stairs tile inside
+  the room.
+- **Loot nudge.** Loot spawn also avoids the stairs tile centre.
+- **Dungeon.stairs: Option<TilePos>** now published by `bsp::generate`
+  so callers can avoid the descent without re-scanning tiles.
+- **2 new regression tests** (`stairs_unblocked_tests`): sweep 30
+  seeds on floor 1 and a fixed seed on BOSS_FLOOR, both asserting that
+  no entity occupies the stairs tile.
+- Total: **66 passed / 0 failed** (was 64 in v0.5.11).
+
 ### v0.5.11 — Stairs confirmation popup (no `>` shortcut)
 
 - **Descent is now a popup, not a hotkey.** Walking onto a `▼` StairsDown

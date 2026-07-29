@@ -919,20 +919,48 @@ pub fn spawn_enemy(
     }
 }
 
+/// v0.5.12: pick a tile inside `room` that is NOT the stairs tile. Tries
+/// the 8 neighbors of the stairs tile first; falls back to the room center
+/// if every neighbor is out of bounds. Used by the boss spawn so the boss
+/// never occupies the same tile as the descent.
+fn pick_non_stairs_tile(room: &asciirogue_procgen::Rect, sx: i32, sy: i32) -> Option<(i32, i32)> {
+    for (dx, dy) in [(0,1), (1,0), (0,-1), (-1,0), (1,1), (1,-1), (-1,-1), (-1,1)] {
+        let nx = sx + dx;
+        let ny = sy + dy;
+        if room.contains(nx, ny) && (nx != sx || ny != sy) {
+            return Some((nx, ny));
+        }
+    }
+    None
+}
+
 /// Spawn monsters + loot scaled by floor number (1..=MAX_FLOORS).
 pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: FloorTheme) {
     // Difficulty scales linearly: HP + attack bonus per floor.
     let scale = floor as i32; // 1..=8
 
     // Spawn 2 standard enemies per floor (in non-boss floors) + 1 boss on BOSS_FLOOR.
+    // v0.5.12: idx.min(rooms-1) used to land on the last room whenever
+    // rooms.len() <= 3, which placed a goblin on the stairs tile. We now
+    // back off to the penultimate room if `idx.min(room_count-1)` would
+    // otherwise collide with the descent.
     let room_count = dungeon.rooms.len();
+    let last_room_idx = room_count.saturating_sub(1);
+    let safe_room = |idx: usize| -> usize {
+        let picked = idx.min(room_count.saturating_sub(1));
+        if picked == last_room_idx && last_room_idx > 0 {
+            last_room_idx.saturating_sub(1)
+        } else {
+            picked
+        }
+    };
     if room_count >= 3 {
         let mut idx = 1_usize;
         // Tier 1: a rat in room[1] (always available, weakest).
         spawn_enemy(
             world,
             dungeon,
-            idx.min(room_count - 1),
+            safe_room(idx),
             'r',
             "쥐",
             6 + scale,
@@ -959,7 +987,7 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
         spawn_enemy(
             world,
             dungeon,
-            idx.min(room_count - 1),
+            safe_room(idx),
             glyph2,
             name2,
             14 + scale * 2,
@@ -973,7 +1001,7 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
         spawn_enemy(
             world,
             dungeon,
-            3_usize.min(room_count - 1),
+            safe_room(3),
             'B',
             "곰",
             28 + scale * 2,
@@ -984,9 +1012,22 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
     }
 
     // Boss on BOSS_FLOOR.
+    // v0.5.12: spawn the boss on a tile adjacent to the stairs (NOT the
+    // stairs tile itself). Previously the boss sat on the same tile as
+    // the descent, so the player could not walk onto ▼ until the boss was
+    // killed — and even after killing, the floor felt unfair ("why is there
+    // a stair symbol under the boss?"). Now the boss stands in a corner
+    // of the last room, the stairs are visible from the doorway, and the
+    // player descends immediately after the kill.
     if floor == BOSS_FLOOR {
         if let Some(room) = dungeon.rooms.last() {
-            let (bx, by) = room.center();
+            let stairs = dungeon.stairs;
+            // Pick a tile inside the last room that is NOT the stairs. We
+            // walk a 4-neighbor offset from the stairs tile; fall back to
+            // the room center if every neighbor is out of bounds.
+            let (sx, sy) = stairs.map(|p| (p.0, p.1)).unwrap_or_else(|| room.center());
+            let (bx, by) = pick_non_stairs_tile(room, sx, sy)
+                .unwrap_or_else(|| room.center());
             world.spawn((
                 Position(TilePos(bx, by)),
                 Renderable::new('D', 0xFF_FF_40),
@@ -1006,9 +1047,19 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
         if i % 2 == 0 {
             continue;
         }
-        // Pick a free tile within the room.
-        let cx = ((room.x1 + room.x2) / 2).max(room.x1 + 1);
-        let cy = ((room.y1 + room.y2) / 2).max(room.y1 + 1);
+        // Pick a free tile within the room. v0.5.12: if the room center
+        // is the stairs tile, nudge to an adjacent tile so the loot never
+        // sits on the descent.
+        let cx_center = (room.x1 + room.x2) / 2;
+        let cy_center = (room.y1 + room.y2) / 2;
+        let (cx, cy) = match dungeon.stairs {
+            Some(s) if (s.0, s.1) == (cx_center, cy_center) => {
+                (cx_center + 1, cy_center)
+            }
+            _ => (cx_center, cy_center),
+        };
+        let cx = cx.max(room.x1 + 1);
+        let cy = cy.max(room.y1 + 1);
         let item = match (floor + i as u32) % 4 {
             0 => Item::gold(10 + scale * 4),
             1 => Item::potion_hp(),
@@ -2173,5 +2224,50 @@ mod confirm_stairs_tests {
         app.modal = ModalMode::ConfirmStairs;
         app.handle(&char_event('y'));
         assert_eq!(app.floor, 2);
+    }
+}
+
+#[cfg(test)]
+mod stairs_unblocked_tests {
+    use super::*;
+    use asciirogue_core::Position;
+
+    /// v0.5.12 regression: nothing should spawn on the StairsDown tile.
+    /// Pre-v0.5.12, the boss sat on the stairs tile at the bottom of every
+    /// dungeon, so the player could not walk onto ▼ until the boss died —
+    /// and even after killing the boss, the descent was visually obscured.
+    /// Smaller dungeons also placed rats/goblins on the stairs tile.
+    #[test]
+    fn no_entity_or_item_on_stairs_tile() {
+        // Sweep many seeds to maximise coverage.
+        for seed in 0u64..30 {
+            let app = App::new_at(seed, 1);
+            let stairs = app
+                .dungeon
+                .stairs
+                .expect("every floor should have a stairs tile");
+            for (_, pos) in app.world.query::<&Position>().iter() {
+                assert_ne!(
+                    (pos.0.0, pos.0.1),
+                    (stairs.0, stairs.1),
+                    "seed={}: entity occupies the stairs tile at ({},{})",
+                    seed, stairs.0, stairs.1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn boss_does_not_occupy_stairs_tile() {
+        let app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
+        let stairs = app.dungeon.stairs.expect("boss floor has stairs");
+        for (entity, pos) in app.world.query::<&Position>().iter() {
+            if (pos.0.0, pos.0.1) == (stairs.0, stairs.1) {
+                panic!(
+                    "boss floor: entity {:?} occupies the stairs tile at ({},{})",
+                    entity, stairs.0, stairs.1
+                );
+            }
+        }
     }
 }

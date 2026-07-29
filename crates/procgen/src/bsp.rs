@@ -5,6 +5,7 @@
 //! room. Sibling rooms are connected with L-shaped corridors.
 
 use crate::{Dungeon, Rect, Tile};
+use asciirogue_core::TilePos;
 
 /// Configuration knobs for BSP generation.
 #[derive(Copy, Clone, Debug)]
@@ -157,7 +158,7 @@ fn connect(node: &Node, dungeon: &mut Dungeon) {
 pub fn generate(width: i32, height: i32, seed: u64, cfg: Config) -> Dungeon {
     let mut rng = Rng::new(seed);
     let tiles = vec![Tile::Rock; (width * height) as usize];
-    let mut dungeon = Dungeon { width, height, tiles, rooms: Vec::new() };
+    let mut dungeon = Dungeon { width, height, tiles, rooms: Vec::new(), stairs: None };
 
     let mut root = Node {
         rect: Rect::new(0, 0, width - 1, height - 1),
@@ -176,8 +177,12 @@ pub fn generate(width: i32, height: i32, seed: u64, cfg: Config) -> Dungeon {
     // Use the last room in `rooms_snapshot` (which is farthest due to BSP ordering).
     if let Some(last_room) = rooms_snapshot.last() {
         let (cx, cy) = last_room.center();
-        // Place stairs on that tile; if a boss later occupies it (BOSS_FLOOR), the boss entity will sit on stairs.
+        // Place stairs on that tile; if a boss later occupies it (BOSS_FLOOR),
+        // the boss entity will sit on the stairs tile.
         dungeon.set(cx, cy, Tile::StairsDown);
+        // v0.5.12: also publish the location so callers can avoid spawning
+        // enemies, loot, or boss on the same tile.
+        dungeon.stairs = Some(TilePos(cx, cy));
     }
     dungeon
 }

@@ -18,3 +18,4 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 anyhow = { workspace = true }
 hecs = { workspace = true }
+ron = { workspace = true }

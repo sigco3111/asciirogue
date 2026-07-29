@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use asciirogue_combat::{attack, ai};
 use asciirogue_core::{
+    i18n::{self, Key as I18nKey, Locale},
+    meta::SoulRemembrance,
     vision, Ai, AiKind, Direction, FloorTheme, Health, Inventory, Item, Mana, Name,
     Player, Position, Renderable, Stats, TilePos, Viewshed,
 };
@@ -28,7 +30,7 @@ struct App {
     dungeon: Dungeon,
     seed: u64,
     running: bool,
-    /// Current floor (1..=28).
+    /// Current floor (1..=8).
     floor: u32,
     /// Blocked sight cells computed once per level (true = wall/rock).
     blocks: Vec<bool>,
@@ -40,6 +42,12 @@ struct App {
     tick: u64,
     /// True when the boss for this floor is defeated; used to enable descent.
     boss_defeated: bool,
+    /// Active locale (toggle with `L`).
+    locale: Locale,
+    /// Persistent meta state (Soul Remembrance).
+    remembrance: SoulRemembrance,
+    /// Gold the player is carrying right now (collected from coin drops).
+    gold: u32,
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -51,10 +59,29 @@ const INVENTORY_MAX: usize = 8;
 
 impl App {
     fn new(base_seed: u64) -> Self {
-        Self::new_at(base_seed, 1)
+        let loc = Locale::from_code(&std::env::var("ASCIITROGUE_LANG").unwrap_or_default());
+        Self::new_at_with(
+            base_seed,
+            1,
+            load_remembrance(),
+            loc,
+            0,
+        )
     }
 
+    /// Convenience for tests: a fresh App with no saved meta.
+    #[allow(dead_code)]
     fn new_at(base_seed: u64, floor: u32) -> Self {
+        Self::new_at_with(base_seed, floor, SoulRemembrance::new(), Locale::Korean, 0)
+    }
+
+    fn new_at_with(
+        base_seed: u64,
+        floor: u32,
+        remembrance: SoulRemembrance,
+        locale: Locale,
+        carried_gold: u32,
+    ) -> Self {
         let theme = FloorTheme::from_depth(floor);
         // Per-floor seed: combine base + floor so each descent is deterministic.
         let seed = base_seed
@@ -86,6 +113,19 @@ impl App {
 
         let blocks = build_blocks(&dungeon);
         let boss_defeated = floor > BOSS_FLOOR; // past-boss floors count as cleared
+
+        // Compose an opening log line using the active locale.
+        let startup_args: [&dyn std::fmt::Display; 2] =
+            [&floor as &dyn std::fmt::Display, &theme.label() as &dyn std::fmt::Display];
+        let startup_msg = format!(
+            "{} — {}",
+            t_format_with_locale(I18nKey::MsgFloorEntered, locale, &startup_args),
+            match locale {
+                Locale::Korean => "h/j/k/l, 화살표, yubn, > 내려가기",
+                Locale::English => "h/j/k/l, arrows, yubn, > to descend",
+            }
+        );
+
         let mut app = Self {
             dungeon,
             seed,
@@ -94,13 +134,12 @@ impl App {
             blocks,
             world,
             player,
-            messages: vec![format!(
-                "v0.4 {}F {} — h/j/k/l, arrows, yubn, > 내려가기",
-                floor,
-                theme.label()
-            )],
+            messages: vec![startup_msg],
             tick: 0,
             boss_defeated,
+            locale,
+            remembrance,
+            gold: carried_gold,
         };
         app.recompute_fov();
         app
@@ -128,12 +167,42 @@ impl App {
                     }
                     KeyCode::Char('R') => {
                         // Restart the run from floor 1.
-                        *self = App::new_at(self.seed, 1);
+                        let rem = self.remembrance.clone();
+                        let locale = self.locale;
+                        *self = App::new_at_with(self.seed, 1, rem, locale, 0);
+                    }
+                    KeyCode::Char('S') => {
+                        // Save: persist current meta state to disk.
+                        let _ = save_remembrance(&self.remembrance);
+                        self.log(format!(
+                            "영혼 기억 저장: {} 회 클리어, {} 챔피언 영혼",
+                            self.remembrance.clears, self.remembrance.champion_count
+                        ));
+                    }
+                    KeyCode::Char('L') => {
+                        // Locale toggle.
+                        self.locale = match self.locale {
+                            Locale::Korean => Locale::English,
+                            Locale::English => Locale::Korean,
+                        };
+                        self.log(match self.locale {
+                            Locale::Korean => "언어: 한국어",
+                            Locale::English => "Locale: English",
+                        });
+                    }
+                    KeyCode::Char('?') => {
+                        // In-screen help (one message burst).
+                        self.log("h/j/k/l 이동 | yubn 대각 | 화살표 이동".to_string());
+                        self.log("g 줍기 | i 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
+                        self.log("S 영혼 저장 | L 언어 토글 | ? 도움말".to_string());
                     }
                     KeyCode::Char('r') => {
                         // Re-roll current floor seed (dev cheat).
                         let new_base = self.seed.wrapping_add(0x12345);
-                        *self = App::new_at(new_base, self.floor);
+                        let rem = self.remembrance.clone();
+                        let locale = self.locale;
+                        let gold = self.gold;
+                        *self = App::new_at_with(new_base, self.floor, rem, locale, gold);
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         // Debug: clear viewshed memory.
@@ -161,10 +230,21 @@ impl App {
                             self.log("보스를 먼저 처치하세요.");
                         } else if next_floor > MAX_FLOORS {
                             self.log("이미 던전 끝에 도달했습니다.");
+                            // Final-floor cleared: end-of-run rewards.
+                            self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
+                            let _ = save_remembrance(&self.remembrance);
+                            self.log(format!(
+                                "쏠쏠리의 방 클리어! clears={}, soul_wisps={}",
+                                self.remembrance.clears,
+                                self.remembrance.wisps,
+                            ));
                         } else {
-                            // Keep the same base seed; descend.
+                            // Mid-run descent — keep gold + remembrance.
+                            let rem = self.remembrance.clone();
+                            let locale = self.locale;
+                            let gold = self.gold;
                             let seed_save = self.seed;
-                            *self = App::new_at(seed_save, next_floor);
+                            *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
                             self.log(format!("{}층으로 내려갑니다.", next_floor));
                         }
                     }
@@ -289,6 +369,15 @@ impl App {
         if boss.is_some() && !self.boss_defeated {
             self.boss_defeated = true;
             self.log(format!("{}층 보스 격파! '>' 내려가기.", self.floor));
+        }
+        // Death check on player.
+        let player_died = self
+            .world
+            .get::<&Health>(self.player)
+            .map(|h| h.is_dead())
+            .unwrap_or(false);
+        if player_died {
+            self.log("쓰러졌습니다… (R 새 게임)".to_string());
         }
     }
 
@@ -472,6 +561,78 @@ impl App {
         )))
         .block(Block::default().borders(Borders::ALL));
         frame.render_widget(status, chunks[2]);
+    }
+}
+
+// ─── i18n helpers ────────────────────────────────────────────────────────────
+
+/// Look up a translation key in the app's current locale and apply simple
+/// `{}`-style positional substitution. For the small set of formats we use,
+/// `{}` is replaced in order with the variadic args converted via Display.
+#[allow(dead_code)]
+fn t_format(app: &App, key: I18nKey, args: &[&dyn std::fmt::Display]) -> String {
+    t_format_with_locale(key, app.locale, args)
+}
+
+/// Same as `t_format`, but takes the locale directly. Useful when we need to
+/// format a string before `App` exists (e.g. inside `new_at_with`).
+fn t_format_with_locale(
+    key: I18nKey,
+    locale: Locale,
+    args: &[&dyn std::fmt::Display],
+) -> String {
+    let raw = i18n::t_for(key, locale);
+    let mut out = String::with_capacity(raw.len() + 16);
+    let mut arg_idx = 0;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' && chars.peek() == Some(&'}') {
+            chars.next(); // consume '}'
+            if let Some(a) = args.get(arg_idx) {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "{}", a);
+                arg_idx += 1;
+            } else {
+                out.push_str("{}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn log_t(app: &mut App, key: I18nKey, args: &[&dyn std::fmt::Display]) {
+    let s = t_format(app, key, args);
+    app.log(s);
+}
+
+// ─── save / load ──────────────────────────────────────────────────────────────
+
+fn save_root() -> std::path::PathBuf {
+    let mut p = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    p.push(".local");
+    p.push("share");
+    p.push("asciirogue");
+    let _ = std::fs::create_dir_all(&p);
+    p.push("remembrance.ron");
+    p
+}
+
+fn save_remembrance(r: &SoulRemembrance) -> std::io::Result<()> {
+    let path = save_root();
+    let s = ron::to_string(r).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(path, s)
+}
+
+fn load_remembrance() -> SoulRemembrance {
+    let path = save_root();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => ron::from_str(&s).unwrap_or_default(),
+        Err(_) => SoulRemembrance::new(),
     }
 }
 
@@ -872,7 +1033,14 @@ fn main() -> Result<()> {
         eprintln!("  ← ↓ ↑ →  — cardinal movement (arrow keys)");
         eprintln!("  .        — wait one turn");
         eprintln!("  c        — clear vision memory");
-        eprintln!("  r        — new random seed (regenerate dungeon)");
+        eprintln!("  r        — new random seed (regenerate current floor)");
+        eprintln!("  R        — restart the run from floor 1");
+        eprintln!("  g        — pick up item under player");
+        eprintln!("  i        — use first available potion");
+        eprintln!("  >        — descend (after defeating the floor's boss)");
+        eprintln!("  ?        — show help lines");
+        eprintln!("  S        — save meta (Soul Remembrance) to disk");
+        eprintln!("  L        — toggle locale (ko / en)");
         eprintln!("  q / Esc  — quit");
         eprintln!();
         eprintln!("Usage:");
@@ -880,6 +1048,9 @@ fn main() -> Result<()> {
         eprintln!("  asciirogue --dump       Dump floors (with FOV) to stdout (no TTY required)");
         eprintln!("  asciirogue --dump --count 5 --seed 1  Dump 5 floors with custom seed");
         eprintln!("  asciirogue --help       Show this message");
+        eprintln!();
+        eprintln!("Environment:");
+        eprintln!("  ASCIITROGUE_LANG=ko|en  Override startup locale (default: ko)");
         return Ok(());
     }
 

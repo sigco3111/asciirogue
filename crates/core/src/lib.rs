@@ -3,6 +3,8 @@
 
 #![deny(rust_2018_idioms)]
 
+pub mod i18n;
+pub mod meta;
 pub mod vision;
 
 use serde::{Deserialize, Serialize};

@@ -2,11 +2,12 @@
 
 use anyhow::{Context, Result};
 use asciirogue_combat::{attack, ai};
+pub use asciirogue_core::EquipSlot;
 use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
     meta::SoulRemembrance,
-    vision, Ai, AiKind, Direction, FloorTheme, Health, Inventory, Item, Mana, Name,
-    Player, Position, Renderable, Stats, TilePos, Viewshed,
+    vision, Ai, AiKind, Direction, Equipment, FloorTheme, Health, Inventory, Item,
+    ItemKind, Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
@@ -56,6 +57,17 @@ pub struct App {
     /// except `R` (restart) and `q` (quit) until the user starts a new run.
     /// Saved-state dumps via `--dump` can still inspect the floor.
     game_over: bool,
+    /// v0.5.7: top-level UI mode. While Closed, keys go to gameplay. While
+    /// Open, keys go to the inventory modal and the world is frozen.
+    modal: ModalMode,
+}
+
+/// v0.5.7: Modal sub-modes. Currently only Inventory, but the enum keeps
+/// the door open for future screens (spellbook, character sheet, …).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ModalMode {
+    Closed,
+    Inventory { cursor: usize },
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -113,6 +125,7 @@ impl App {
             Mana::new(15 + 2 * (floor as i32 - 1)),
             Stats::new(10, 10, 8, 8, 10),
             Inventory::new(INVENTORY_MAX),
+            Equipment::new(),
             Name("모험가".into()),
         ));
 
@@ -149,6 +162,7 @@ impl App {
             remembrance,
             gold: carried_gold,
             game_over: false,
+            modal: ModalMode::Closed,
         };
         app.recompute_fov();
         app
@@ -374,7 +388,14 @@ impl App {
             return;
         }
         let rng = ((self.tick as u32).wrapping_mul(2654435761)) >> 0;
-        let outcome = attack::resolve_attack(&attacker_stats, &target_stats, rng, 0);
+        // v0.5.7: equipment bonuses apply on hit / damage.
+        let outcome = attack::resolve_attack(
+            &attacker_stats,
+            &target_stats,
+            rng,
+            attacker_stats.attack_bonus,
+            target_stats.defense_bonus,
+        );
         if !outcome.hit {
             self.log("빗나감!");
             return;
@@ -554,7 +575,14 @@ impl App {
             Err(_) => Stats::default(),
         };
         let rng = ((self.tick as u32).wrapping_mul(2654435761)) ^ 0xDEAD_BEEF;
-        let outcome = attack::resolve_attack(&atk_stats, &def_stats, rng, 0);
+        // v0.5.7: equipment bonuses apply here too.
+        let outcome = attack::resolve_attack(
+            &atk_stats,
+            &def_stats,
+            rng,
+            atk_stats.attack_bonus,
+            def_stats.defense_bonus,
+        );
         if !outcome.hit {
             self.log("적이 빗나감.");
             return;
@@ -1035,6 +1063,264 @@ pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome
     } else {
         PickupOutcome::NoItem
     }
+}
+
+/// v0.5.7 — apply the equipped items' bonuses into the entity's `Stats`.
+/// Called whenever an item is equipped, unequipped, or the inventory changes
+/// in a way that might shift which item is worn. Sets `attack_bonus` to the
+/// sum of weapon bonuses and `defense_bonus` to the sum of armor bonuses
+/// (which currently both map to `Item.bonus`).
+pub fn recompute_stats_from_equipment(world: &mut World, entity: hecs::Entity) {
+    // We have to fetch Equipment and Inventory under non-overlapping borrows.
+    let (atk, def) = {
+        let equip = match world.get::<&Equipment>(entity) {
+            Ok(e) => *e,
+            Err(_) => return,
+        };
+        let inv = match world.get::<&Inventory>(entity) {
+            Ok(i) => i,
+            Err(_) => return,
+        };
+        let mut atk = 0i32;
+        let mut def = 0i32;
+        if let Some(idx) = equip.weapon {
+            if let Some(Some(it)) = inv.slots.get(idx) {
+                atk += it.bonus;
+            }
+        }
+        if let Some(idx) = equip.armor {
+            if let Some(Some(it)) = inv.slots.get(idx) {
+                def += it.bonus;
+            }
+        }
+        (atk, def)
+    };
+    if let Ok(mut s) = world.get::<&mut Stats>(entity) {
+        s.attack_bonus = atk;
+        s.defense_bonus = def;
+    }
+}
+
+/// v0.5.7: Use the inventory item at `idx`. Returns a user-facing message.
+///
+/// Behaviour by kind:
+/// - HealthPotion / ManaPotion → consume and apply
+/// - Weapon / Armor            → "장비는 (e) 키로 장착하세요."
+/// - Coin                      → consumed silently into the player's gold stash
+///   (note: ground coins auto-convert at pickup time, so a coin in inventory
+///   is unusual; we keep the path for completeness)
+pub fn use_inventory_at(world: &mut World, player: hecs::Entity, idx: usize) -> Option<String> {
+    let item = {
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        inv.take(idx)?
+    };
+    let msg = match item.kind {
+        ItemKind::HealthPotion => {
+            let healed = item.bonus;
+            if let Ok(mut h) = world.get::<&mut Health>(player) {
+                h.current = (h.current + healed).min(h.max);
+                format!("치유 물약 사용! HP +{}", healed)
+            } else {
+                String::from("치유 물약...")
+            }
+        }
+        ItemKind::ManaPotion => {
+            let restored = item.bonus;
+            if let Ok(mut m) = world.get::<&mut Mana>(player) {
+                m.current = (m.current + restored).min(m.max);
+                format!("마나 물약 사용! MP +{}", restored)
+            } else {
+                String::from("마나 물약...")
+            }
+        }
+        ItemKind::Weapon | ItemKind::Armor => format!("장비는 (e) 키로 장착하세요. ({}{})", item.glyph, item.name),
+        ItemKind::Coin => {
+            format!("{} 골드 획득!", item.bonus)
+        }
+    };
+    Some(msg)
+}
+
+/// v0.5.7: Equip the inventory item at `idx` into its matching slot.
+/// Returns a user-facing message. If the slot is already occupied, the old
+/// item is **swapped out** into the inventory (its slot stays the same, the
+/// previously equipped item takes its old inventory slot). If the item kind
+/// doesn't match any equipment slot, returns "장착할 수 없는 아이템".
+pub fn equip_inventory_at(world: &mut World, player: hecs::Entity, idx: usize) -> Option<String> {
+    let item = {
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        inv.take(idx)?
+    };
+    let kind = item.kind;
+    let name = item.name.clone();
+    let glyph = item.glyph;
+
+    let target_slot = match kind {
+        ItemKind::Weapon => Some(EquipSlot::Weapon),
+        ItemKind::Armor => Some(EquipSlot::Armor),
+        _ => None,
+    };
+    let Some(slot) = target_slot else {
+        // Put it back — can't equip this.
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        let _ = inv.put_at(idx, item);
+        return Some("장착할 수 없는 아이템".to_string());
+    };
+
+    // If the chosen slot is currently occupied, move the old equipment back
+    // into this same inventory slot.
+    let prev_slot = {
+        let equip = world.get::<&Equipment>(player).ok()?;
+        match slot {
+            EquipSlot::Weapon => equip.weapon,
+            EquipSlot::Armor => equip.armor,
+        }
+    };
+    if let Some(prev_idx) = prev_slot {
+        if prev_idx != idx {
+            let mut inv = world.get::<&mut Inventory>(player).ok()?;
+            if let Some(prev_item) = inv.take(prev_idx) {
+                // Slot `idx` is about to receive the new item, so put the
+                // old equipment anywhere EXCEPT `idx` (which will be filled
+                // a moment later). Try the first free slot first; fall back
+                // to pushing anywhere.
+                let mut placed = false;
+                for (i, slot) in inv.slots.iter_mut().enumerate() {
+                    if i != idx && slot.is_none() {
+                        *slot = Some(prev_item.clone());
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed {
+                    // Drop on the floor instead of failing the equip — the
+                    // player should never lose gear because they equipped
+                    // something over it. Release the inventory borrow before
+                    // touching `world` for the spawn.
+                    drop(inv);
+                    let pos = world.get::<&Position>(player).ok()?.0;
+                    let occupied = world
+                        .query::<(&Position, &Item)>()
+                        .iter()
+                        .any(|(_, (p, _))| p.0 == pos);
+                    if !occupied {
+                        world.spawn((
+                            Position(pos),
+                            Renderable::new(prev_item.glyph, prev_item.fg_rgb),
+                            prev_item,
+                        ));
+                    } else {
+                        // Last resort: shove into any free slot.
+                        let mut inv2 = world.get::<&mut Inventory>(player).ok()?;
+                        if inv2.push(prev_item.clone()).is_err() {
+                            // Truly no room — overwrite `idx` (player loses the
+                            // old item, but they keep the new one).
+                            let _ = inv2.put_at(idx, prev_item);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Place the new item back at `idx`, then record it in Equipment.
+    {
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        if inv.put_at(idx, item).is_err() {
+            return Some("인벤토리가 가득 찼습니다.".to_string());
+        }
+    }
+    {
+        let mut equip = world.get::<&mut Equipment>(player).ok()?;
+        match slot {
+            EquipSlot::Weapon => equip.weapon = Some(idx),
+            EquipSlot::Armor => equip.armor = Some(idx),
+        }
+    }
+    recompute_stats_from_equipment(world, player);
+    let slot_name = match slot {
+        EquipSlot::Weapon => "무기",
+        EquipSlot::Armor => "방어구",
+    };
+    Some(format!("{} ({}{}) 장착!", slot_name, glyph, name))
+}
+
+/// v0.5.7: Unequip whatever currently fills the given equipment slot.
+/// Returns the unequipped item to the inventory (or drops it if full).
+pub fn unequip_slot(world: &mut World, player: hecs::Entity, slot: EquipSlot) -> Option<String> {
+    let idx = {
+        let equip = world.get::<&Equipment>(player).ok()?;
+        match slot {
+            EquipSlot::Weapon => equip.weapon?,
+            EquipSlot::Armor => equip.armor?,
+        }
+    };
+    let item = {
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        inv.take(idx)?
+    };
+    {
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        if inv.put_at(idx, item.clone()).is_err() {
+            // No room — push anywhere.
+            if inv.push(item).is_err() {
+                return Some("인벤토리가 가득 차 해제할 수 없습니다.".to_string());
+            }
+        }
+    }
+    {
+        let mut equip = world.get::<&mut Equipment>(player).ok()?;
+        match slot {
+            EquipSlot::Weapon => equip.weapon = None,
+            EquipSlot::Armor => equip.armor = None,
+        }
+    }
+    recompute_stats_from_equipment(world, player);
+    let slot_name = match slot {
+        EquipSlot::Weapon => "무기",
+        EquipSlot::Armor => "방어구",
+    };
+    Some(format!("{} 해제!", slot_name))
+}
+
+/// v0.5.7: Toggle the item at `idx`. If it's currently equipped, unequip it;
+/// otherwise equip it.
+pub fn toggle_equip_at(world: &mut World, player: hecs::Entity, idx: usize) -> Option<String> {
+    let slot = {
+        let equip = world.get::<&Equipment>(player).ok()?;
+        equip.slot_of(idx)
+    };
+    match slot {
+        Some(s) => unequip_slot(world, player, s),
+        None => equip_inventory_at(world, player, idx),
+    }
+}
+
+/// v0.5.7: Drop the item at `idx` onto the player's tile. If the tile is
+/// already occupied by another ground item, the drop fails.
+pub fn drop_inventory_at(
+    world: &mut World,
+    player: hecs::Entity,
+    idx: usize,
+) -> Option<String> {
+    let item = {
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        inv.take(idx)?
+    };
+    let pos = world.get::<&Position>(player).ok()?.0;
+    // Check the tile is free.
+    let occupied = world
+        .query::<(&Position, &Item)>()
+        .iter()
+        .any(|(_, (p, _))| p.0 == pos);
+    if occupied {
+        // Put it back.
+        let mut inv = world.get::<&mut Inventory>(player).ok()?;
+        let _ = inv.put_at(idx, item);
+        return Some("이 타일에는 이미 다른 아이템이 있습니다.".to_string());
+    }
+    world.spawn((Position(pos), Renderable::new(item.glyph, item.fg_rgb), item));
+    Some("아이템을 바닥에 내려놓았습니다.".to_string())
 }
 
 /// Use the first available potion in the inventory (key `i`).

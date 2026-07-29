@@ -14,11 +14,18 @@ pub struct AttackOutcome {
 
 /// Resolve an attack. `rng` is a 0..=99 d100-style value (caller-provided).
 /// Auto-clamped to [0, 99].
+///
+/// `attack_bonus` and `defense_bonus` come from the entity's equipped gear
+/// (folded into `Stats.attack_bonus` / `Stats.defense_bonus` by
+/// `App::recompute_stats_from_equipment`). v0.5.7 wires both bonuses:
+/// - `attack_bonus` raises the to-hit chance (each +1 ≈ +1% chance to hit)
+/// - `defense_bonus` subtracts from final damage (clamped at 0)
 pub fn resolve_attack(
     attacker_stats: &Stats,
     defender_stats: &Stats,
     rng: u32,
     attack_bonus: i32,
+    defense_bonus: i32,
 ) -> AttackOutcome {
     let roll = (rng as i32).clamp(0, 99);
 
@@ -35,10 +42,10 @@ pub fn resolve_attack(
         return AttackOutcome { hit: false, dmg: 0, crit: false };
     }
 
-    // Damage: STR + d<STR> - DEF/2, minimum 1.
+    // Damage: STR + d<STR> - DEF/2 - defense_bonus, minimum 1.
     let variance = attacker_stats.strength.max(1);
     let d = (rng as i32 % (variance * 2 + 1)) - variance;
-    let raw = attacker_stats.strength + d - defender_stats.constitution / 2;
+    let raw = attacker_stats.strength + d - defender_stats.constitution / 2 - defense_bonus;
     let dmg = raw.max(1);
     let dmg = if crit { dmg * 5 / 2 } else { dmg };
     AttackOutcome { hit: true, dmg, crit }
@@ -57,21 +64,21 @@ mod tests {
 
     #[test]
     fn miss_with_high_dodge() {
-        let out = resolve_attack(&atk(5, 5), &def(3, 30), 50, 0);
+        let out = resolve_attack(&atk(5, 5), &def(3, 30), 50, 0, 0);
         assert!(!out.hit, "target with high DEX should dodge low roll");
         assert_eq!(out.dmg, 0);
     }
 
     #[test]
     fn hit_with_high_attacker() {
-        let out = resolve_attack(&atk(10, 20), &def(2, 0), 99, 5);
+        let out = resolve_attack(&atk(10, 20), &def(2, 0), 99, 5, 0);
         assert!(out.hit);
         assert!(out.dmg >= 1, "every hit should deal at least 1 dmg");
     }
 
     #[test]
     fn natural_crit_on_highest_roll() {
-        let out = resolve_attack(&atk(10, 20), &def(2, 0), 98, 0);
+        let out = resolve_attack(&atk(10, 20), &def(2, 0), 98, 0, 0);
         assert!(out.crit);
         assert!(out.dmg >= 2, "crit bumps damage");
     }
@@ -79,7 +86,7 @@ mod tests {
     #[test]
     fn damage_caps_at_one_minimum() {
         // Concrete defender stats far exceed attacker STR + variance range.
-        let out = resolve_attack(&atk(2, 0), &def(100, 0), 50, 0);
+        let out = resolve_attack(&atk(2, 0), &def(100, 0), 50, 0, 0);
         assert!(out.hit || !out.hit);
         if out.hit {
             assert!(out.dmg >= 1, "damage has a 1-floor (variance can swing negative)");
@@ -89,8 +96,23 @@ mod tests {
     #[test]
     fn crit_overrides_miss() {
         // Low roll but still crit because 99 ≥ 95
-        let out = resolve_attack(&atk(10, 20), &def(2, 50), 99, 0);
+        let out = resolve_attack(&atk(10, 20), &def(2, 50), 99, 0, 0);
         assert!(out.crit);
         assert!(out.hit, "crit counts as hit even when dodge threshold is high");
+    }
+
+    /// v0.5.7 regression: armor with `defense_bonus` must lower incoming damage.
+    #[test]
+    fn defense_bonus_reduces_damage() {
+        let no_armor = resolve_attack(&atk(20, 0), &def(2, 0), 90, 0, 0);
+        let with_armor = resolve_attack(&atk(20, 0), &def(2, 0), 90, 0, 3);
+        assert!(no_armor.hit);
+        assert!(with_armor.hit);
+        assert!(
+            no_armor.dmg - with_armor.dmg >= 3,
+            "defense_bonus=3 should reduce dmg by 3+ (no_armor={} with_armor={})",
+            no_armor.dmg,
+            with_armor.dmg
+        );
     }
 }

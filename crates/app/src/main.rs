@@ -5,8 +5,8 @@ use asciirogue_combat::{attack, ai};
 use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
     meta::SoulRemembrance,
-    vision, Ai, AiKind, Direction, FloorTheme, Health, Inventory, Item, Mana, Name,
-    Player, Position, Renderable, Stats, TilePos, Viewshed,
+    vision, Ai, AiKind, Direction, EquipSlot, Equipment, FloorTheme, Health, Inventory, Item,
+    ItemKind, Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
@@ -14,7 +14,10 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::disable_raw_mode;
 use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
-use asciirogue::{pick_up_outcome, nearest_pickup_info, PickupOutcome};
+use asciirogue::{
+    drop_inventory_at, nearest_pickup_info, pick_up_outcome, toggle_equip_at, use_inventory_at,
+    ModalMode, PickupOutcome,
+};
 use hecs::World;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Span;
@@ -57,6 +60,8 @@ struct App {
     /// except `R` (restart) and `q` (quit) until the user starts a new run.
     /// Saved-state dumps via `--dump` can still inspect the floor.
     game_over: bool,
+    /// v0.5.7: top-level UI mode.
+    modal: ModalMode,
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -114,6 +119,7 @@ impl App {
             Mana::new(15 + 2 * (floor as i32 - 1)),
             Stats::new(10, 10, 8, 8, 10),
             Inventory::new(INVENTORY_MAX),
+            Equipment::new(),
             Name("모험가".into()),
         ));
 
@@ -150,6 +156,7 @@ impl App {
             remembrance,
             gold: carried_gold,
             game_over: false,
+            modal: ModalMode::Closed,
         };
         app.recompute_fov();
         app
@@ -171,6 +178,15 @@ impl App {
         if let Event::Key(k) = ev {
             if k.kind == KeyEventKind::Press {
                 let dir = key_to_direction(&k.code);
+                // v0.5.7: while the inventory modal is open, all keys are
+                // routed to the modal handler. Only Esc / I / q reopen the
+                // gameplay loop. This means enemies don't move, FOV doesn't
+                // recompute, and the player can't accidentally walk into a
+                // monster while inspecting loot.
+                if let ModalMode::Inventory { cursor } = self.modal {
+                    self.handle_inventory_key(k.code, cursor);
+                    return;
+                }
                 // When dead, only R (restart) or q (quit) do anything.
                 if self.game_over {
                     match k.code {
@@ -257,12 +273,27 @@ impl App {
                             }
                         }
                     }
-                    KeyCode::Char('i') | KeyCode::Char('I') => {
+                    KeyCode::Char('i') => {
+                        // Quick-potion: use the first available potion in
+                        // inventory without opening the modal. Convenient for
+                        // emergency HP/MP top-ups. v0.5.7: 'I' (uppercase)
+                        // opens the inventory modal instead.
                         if let Some(msg) = use_first_potion(&mut self.world, self.player) {
                             self.log(msg);
                         } else {
                             self.log("사용할 물약이 없습니다.");
                         }
+                    }
+                    KeyCode::Char('I') => {
+                        // v0.5.7: open inventory modal. Cursor starts on the
+                        // first non-empty slot if any, else slot 0.
+                        let cursor = self
+                            .world
+                            .get::<&Inventory>(self.player)
+                            .ok()
+                            .and_then(|inv| inv.slots.iter().position(|s| s.is_some()))
+                            .unwrap_or(0);
+                        self.modal = ModalMode::Inventory { cursor };
                     }
                     KeyCode::Char('>') => {
                         let next_floor = self.floor + 1;
@@ -346,6 +377,80 @@ impl App {
         self.enemy_take_turns();
     }
 
+    /// v0.5.7: dispatch one inventory-modal key. Mutates `self.modal`.
+    ///
+    /// Modal keymap (8-slot inventory):
+    ///   j / Down   → cursor down (wraps)
+    ///   k / Up     → cursor up   (wraps)
+    ///   Enter      → default action for the slot (potion → use, weapon/armor → toggle equip)
+    ///   e          → toggle equip / unequip
+    ///   u          → use (potion only)
+    ///   d / x      → drop
+    ///   Esc / I / q → close modal
+    fn handle_inventory_key(&mut self, code: KeyCode, cursor: usize) {
+        // Number of inventory slots — kept in sync with INVENTORY_MAX.
+        let slot_count = self
+            .world
+            .get::<&Inventory>(self.player)
+            .map(|i| i.max)
+            .unwrap_or(8);
+        let next_cursor = |cur: usize, delta: i32| -> usize {
+            let n = slot_count as i32;
+            let c = cur as i32 + delta;
+            ((c % n + n) % n) as usize
+        };
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.modal = ModalMode::Inventory { cursor: next_cursor(cursor, 1) };
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.modal = ModalMode::Inventory { cursor: next_cursor(cursor, -1) };
+            }
+            KeyCode::Char('e') => {
+                if let Some(msg) = toggle_equip_at(&mut self.world, self.player, cursor) {
+                    self.log(msg);
+                }
+            }
+            KeyCode::Char('u') => {
+                if let Some(msg) = use_inventory_at(&mut self.world, self.player, cursor) {
+                    self.log(msg);
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('x') => {
+                if let Some(msg) = drop_inventory_at(&mut self.world, self.player, cursor) {
+                    self.log(msg);
+                }
+            }
+            KeyCode::Enter => {
+                // Default action depends on the slot's item kind.
+                let kind = self
+                    .world
+                    .get::<&Inventory>(self.player)
+                    .ok()
+                    .and_then(|i| i.slots.get(cursor).and_then(|s| s.as_ref().map(|it| it.kind)));
+                match kind {
+                    Some(ItemKind::Weapon) | Some(ItemKind::Armor) => {
+                        if let Some(msg) = toggle_equip_at(&mut self.world, self.player, cursor) {
+                            self.log(msg);
+                        }
+                    }
+                    Some(_) => {
+                        if let Some(msg) = use_inventory_at(&mut self.world, self.player, cursor) {
+                            self.log(msg);
+                        }
+                    }
+                    None => {
+                        self.log("빈 슬롯입니다.".to_string());
+                    }
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('I') | KeyCode::Char('q') => {
+                self.modal = ModalMode::Closed;
+            }
+            _ => {}
+        }
+    }
+
     fn entity_at(&self, pos: TilePos) -> Option<hecs::Entity> {
         let mut found = None;
         for (e, p) in self.world.query::<&Position>().iter() {
@@ -378,7 +483,16 @@ impl App {
             return;
         }
         let rng = ((self.tick as u32).wrapping_mul(2654435761)) >> 0;
-        let outcome = attack::resolve_attack(&attacker_stats, &target_stats, rng, 0);
+        // v0.5.7: feed the entity's equipped attack/defense bonuses into
+        // the attack roll. attack_bonus raises to-hit, defense_bonus is
+        // subtracted from incoming damage.
+        let outcome = attack::resolve_attack(
+            &attacker_stats,
+            &target_stats,
+            rng,
+            attacker_stats.attack_bonus,
+            target_stats.defense_bonus,
+        );
         if !outcome.hit {
             self.log("빗나감!");
             return;
@@ -534,7 +648,14 @@ impl App {
             Err(_) => Stats::default(),
         };
         let rng = ((self.tick as u32).wrapping_mul(2654435761)) ^ 0xDEAD_BEEF;
-        let outcome = attack::resolve_attack(&atk_stats, &def_stats, rng, 0);
+        // v0.5.7: equipment bonuses apply on enemy attacks too.
+        let outcome = attack::resolve_attack(
+            &atk_stats,
+            &def_stats,
+            rng,
+            atk_stats.attack_bonus,
+            def_stats.defense_bonus,
+        );
         if !outcome.hit {
             self.log("적이 빗나감.");
             return;
@@ -700,9 +821,9 @@ impl App {
             .collect::<Vec<_>>()
             .join("  |  ");
         let controls_hint = if self.boss_defeated && self.floor == BOSS_FLOOR {
-            "g pick  i potion  > descend  R restart"
+            "g pick  I inv  i potion  > descend  R restart"
         } else {
-            "g pick  i potion  q quit  r new  R restart"
+            "g pick  I inv  i potion  > descend  q quit  R restart"
         };
         let status = Paragraph::new(Span::from(format!(
             "[{}]  rooms {}  {}\n{}",
@@ -713,6 +834,139 @@ impl App {
         )))
         .block(Block::default().borders(Borders::ALL));
         frame.render_widget(status, chunks[2]);
+
+        // v0.5.7: inventory modal overlay.
+        if let ModalMode::Inventory { cursor } = self.modal {
+            self.draw_inventory_modal(frame, area, cursor);
+        }
+    }
+
+    /// v0.5.7: centered modal with the player's inventory. 8-slot grid on
+    /// the left, equipped items on the right, controls hint on the bottom.
+    fn draw_inventory_modal(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect, cursor: usize) {
+        use ratatui::layout::{Constraint, Direction, Layout};
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+
+        // Modal size: 60 cols × 18 rows, centered.
+        let w = 60u16.min(area.width);
+        let h = 18u16.min(area.height);
+        let modal_area = ratatui::layout::Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        // Clear behind the modal so the dungeon doesn't bleed through.
+        frame.render_widget(Clear, modal_area);
+
+        let block = Block::default()
+            .title(" 인벤토리 (I / Esc: 닫기) ")
+            .borders(Borders::ALL);
+        frame.render_widget(block, modal_area);
+
+        let inner = modal_area.inner(ratatui::layout::Margin::new(1, 1));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10), // slot list
+                Constraint::Length(2),  // spacer
+                Constraint::Length(2),  // equipped + stats
+                Constraint::Min(1),    // controls
+            ])
+            .split(inner);
+
+        // ── Slot list (8 slots, 2 columns × 4 rows) ──
+        let slot_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(std::iter::repeat(Constraint::Length(1)).take(8))
+            .split(chunks[0]);
+        let inv = self.world.get::<&Inventory>(self.player).ok();
+        let equip = self.world.get::<&Equipment>(self.player).ok().map(|e| *e);
+        for i in 0..8usize {
+            let slot_area = slot_chunks[i];
+            let item = inv.as_ref().and_then(|inv| inv.slots.get(i).and_then(|s| s.clone()));
+            let tag = match (&item, equip) {
+                (Some(it), Some(eq)) if eq.weapon == Some(i) => "[W]",
+                (Some(it), Some(eq)) if eq.armor == Some(i) => "[A]",
+                _ => "",
+            };
+            let line = match &item {
+                Some(it) => format!(
+                    "{:>2}. {} {:<14}  보너스 {:+}",
+                    i + 1,
+                    tag,
+                    format!("{}{}", it.glyph, it.name),
+                    it.bonus
+                ),
+                None => format!("{:>2}. (비어 있음)", i + 1),
+            };
+            let style = if i == cursor {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let para = Paragraph::new(Span::styled(line, style));
+            frame.render_widget(para, slot_area);
+        }
+
+        // ── Equipped panel + stats ──
+        let eq_lines = {
+            let mut lines = Vec::new();
+            if let (Some(inv), Some(eq)) = (inv.as_ref(), equip) {
+                let weapon = eq
+                    .weapon
+                    .and_then(|idx| inv.slots.get(idx).and_then(|s| s.clone()));
+                let armor = eq
+                    .armor
+                    .and_then(|idx| inv.slots.get(idx).and_then(|s| s.clone()));
+                let weapon_str = weapon
+                    .as_ref()
+                    .map(|i| format!("{}{}  보너스 {:+}", i.glyph, i.name, i.bonus))
+                    .unwrap_or_else(|| "(없음)".to_string());
+                let armor_str = armor
+                    .as_ref()
+                    .map(|i| format!("{}{}  보너스 {:+}", i.glyph, i.name, i.bonus))
+                    .unwrap_or_else(|| "(없음)".to_string());
+                lines.push(Line::from(vec![
+                    Span::styled("무기: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(weapon_str),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("방어구: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(armor_str),
+                ]));
+            }
+            let stats = self.world.get::<&Stats>(self.player).ok();
+            if let Some(s) = stats {
+                lines.push(Line::from(format!(
+                    "공격 보너스: {:+}    방어 보너스: {:+}",
+                    s.attack_bonus, s.defense_bonus
+                )));
+            }
+            lines
+        };
+        let eq_para = Paragraph::new(eq_lines);
+        frame.render_widget(eq_para, chunks[2]);
+
+        // ── Controls ──
+        let ctrl = Paragraph::new(Line::from(vec![
+            Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 이동  "),
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 기본동작  "),
+            Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 장착/해제  "),
+            Span::styled("u", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 사용  "),
+            Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 버리기  "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 닫기"),
+        ]))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(ctrl, chunks[3]);
     }
 }
 
@@ -1299,6 +1553,155 @@ mod tests {
             app.messages.iter().any(|m| m.contains("주웠")),
             "messages should report the pickup: {:?}",
             app.messages
+        );
+    }
+
+    /// v0.5.7: equipping a weapon must flip `Stats.attack_bonus` to its
+    /// `bonus` field, and unequipping must clear it back to 0.
+    #[test]
+    fn test_equip_weapon_updates_attack_bonus() {
+        use asciirogue::{equip_inventory_at, recompute_stats_from_equipment, unequip_slot, EquipSlot};
+        let mut app = App::new(0);
+        // Teleport player and clear inventory.
+        app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(20, 20);
+        let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+        inv.slots.iter_mut().for_each(|s| *s = None);
+        drop(inv);
+        // Place a +5 sword at slot 0.
+        let sword = Item::weapon(5, "롱소드");
+        app.world
+            .get::<&mut Inventory>(app.player)
+            .unwrap()
+            .put_at(0, sword)
+            .unwrap();
+        // No equipment yet → attack_bonus = 0.
+        recompute_stats_from_equipment(&mut app.world, app.player);
+        let stats = app.world.get::<&Stats>(app.player).unwrap();
+        assert_eq!(stats.attack_bonus, 0);
+        assert_eq!(stats.defense_bonus, 0);
+        drop(stats);
+        // Equip it.
+        let msg = equip_inventory_at(&mut app.world, app.player, 0).unwrap();
+        assert!(msg.contains("장착"), "msg should say equipped: {}", msg);
+        let stats = app.world.get::<&Stats>(app.player).unwrap();
+        assert_eq!(stats.attack_bonus, 5, "attack_bonus should reflect sword");
+        drop(stats);
+        // Unequip.
+        let _ = unequip_slot(&mut app.world, app.player, EquipSlot::Weapon).unwrap();
+        let stats = app.world.get::<&Stats>(app.player).unwrap();
+        assert_eq!(stats.attack_bonus, 0, "attack_bonus must clear on unequip");
+    }
+
+    /// v0.5.7: armor contributes to defense_bonus, weapon swaps without
+    /// losing the other slot.
+    #[test]
+    fn test_armor_defense_bonus_and_weapon_swap() {
+        use asciirogue::{equip_inventory_at, recompute_stats_from_equipment, EquipSlot};
+        let mut app = App::new(0);
+        app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(25, 25);
+        let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+        inv.slots.iter_mut().for_each(|s| *s = None);
+        drop(inv);
+        // Place armor at slot 0, two weapons at slots 1 and 2.
+        app.world.get::<&mut Inventory>(app.player).unwrap().put_at(0, Item::armor(3, "가죽갑옷")).unwrap();
+        app.world.get::<&mut Inventory>(app.player).unwrap().put_at(1, Item::weapon(4, "단검")).unwrap();
+        app.world.get::<&mut Inventory>(app.player).unwrap().put_at(2, Item::weapon(7, "도끼")).unwrap();
+        // Equip armor + first weapon.
+        equip_inventory_at(&mut app.world, app.player, 0).unwrap();
+        equip_inventory_at(&mut app.world, app.player, 1).unwrap();
+        recompute_stats_from_equipment(&mut app.world, app.player);
+        let s = app.world.get::<&Stats>(app.player).unwrap();
+        assert_eq!(s.attack_bonus, 4);
+        assert_eq!(s.defense_bonus, 3);
+        drop(s);
+        // Equip the axe — it should swap with the dagger; armor unaffected.
+        equip_inventory_at(&mut app.world, app.player, 2).unwrap();
+        let s = app.world.get::<&Stats>(app.player).unwrap();
+        assert_eq!(s.attack_bonus, 7, "new weapon must take effect");
+        assert_eq!(s.defense_bonus, 3, "armor must NOT be touched by weapon swap");
+        drop(s);
+        // Inventory should still contain the swapped-out dagger somewhere.
+        let inv = app.world.get::<&Inventory>(app.player).unwrap();
+        let dagger_count = inv.slots.iter().filter(|s| s.as_ref().map_or(false, |i| i.name == "단검")).count();
+        assert_eq!(dagger_count, 1, "swapped-out dagger must remain in inventory");
+        // Weapon slot should reference slot 2 (the axe).
+        let eq = app.world.get::<&Equipment>(app.player).unwrap();
+        assert_eq!(eq.weapon, Some(2));
+        assert_eq!(eq.armor, Some(0));
+    }
+
+    /// v0.5.7: using a healing potion must apply the bonus to HP.
+    #[test]
+    fn test_use_health_potion() {
+        use asciirogue::use_inventory_at;
+        let mut app = App::new(0);
+        app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(30, 30);
+        // Drain HP to 10/40.
+        app.world.get::<&mut Health>(app.player).unwrap().current = 10;
+        let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+        inv.slots.iter_mut().for_each(|s| *s = None);
+        inv.put_at(0, Item::potion_hp()).unwrap(); // potion_hp restores +15
+        drop(inv);
+        let msg = use_inventory_at(&mut app.world, app.player, 0).unwrap();
+        assert!(msg.contains("HP +"));
+        let h = app.world.get::<&Health>(app.player).unwrap();
+        assert_eq!(h.current, 25, "HP must rise by potion.bonus");
+    }
+
+    /// v0.5.7: dropping an item onto the player's own tile spawns a ground
+    /// entity at that position.
+    #[test]
+    fn test_drop_inventory_at() {
+        use asciirogue::drop_inventory_at;
+        let mut app = App::new(0);
+        app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(35, 35);
+        let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+        inv.slots.iter_mut().for_each(|s| *s = None);
+        inv.put_at(0, Item::gold(99)).unwrap();
+        drop(inv);
+        let msg = drop_inventory_at(&mut app.world, app.player, 0).unwrap();
+        assert!(msg.contains("내려놓"), "drop msg should be confirmative: {}", msg);
+        // Inventory slot 0 is now empty.
+        let inv = app.world.get::<&Inventory>(app.player).unwrap();
+        assert!(inv.slots[0].is_none());
+        drop(inv);
+        // And there's a ground item at (35, 35).
+        let ground = app
+            .world
+            .query::<(&Position, &Item)>()
+            .iter()
+            .any(|(_, (p, _))| p.0 == TilePos(35, 35));
+        assert!(ground, "dropped item must spawn a ground entity");
+    }
+
+    /// v0.5.7: pressing 'I' opens the inventory modal; 'Esc' closes it.
+    #[test]
+    fn test_inventory_modal_open_close() {
+        let mut app = App::new(0);
+        assert!(matches!(app.modal, ModalMode::Closed));
+        let open = Event::Key(KeyEvent {
+            code: KeyCode::Char('I'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        app.handle(&open);
+        assert!(
+            matches!(app.modal, ModalMode::Inventory { .. }),
+            "I must open the modal: {:?}",
+            app.modal
+        );
+        let esc = Event::Key(KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        app.handle(&esc);
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "Esc must close the modal: {:?}",
+            app.modal
         );
     }
 

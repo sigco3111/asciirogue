@@ -179,6 +179,12 @@ impl Mana {
 }
 
 /// Base stats — derive from class/race and grow with level-ups.
+///
+/// v0.5.7: equipment-derived bonuses live alongside the base stats. They
+/// are recomputed whenever an item is equipped or unequipped (see
+/// `Equipment::recompute_into_stats`). `attack_bonus` and `defense_bonus`
+/// are consumed by `combat::attack::resolve_attack`; the other bonuses
+/// are reserved for future systems (casting, dodge, max-HP, etc.).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
     pub strength: i32,
@@ -186,10 +192,22 @@ pub struct Stats {
     pub intellect: i32,
     pub wisdom: i32,
     pub constitution: i32,
+    /// Equipment-derived bonus added to outgoing damage.
+    pub attack_bonus: i32,
+    /// Equipment-derived bonus subtracted from incoming damage (min 0).
+    pub defense_bonus: i32,
 }
 impl Stats {
     pub const fn new(s: i32, d: i32, i: i32, w: i32, c: i32) -> Self {
-        Self { strength: s, dexterity: d, intellect: i, wisdom: w, constitution: c }
+        Self {
+            strength: s,
+            dexterity: d,
+            intellect: i,
+            wisdom: w,
+            constitution: c,
+            attack_bonus: 0,
+            defense_bonus: 0,
+        }
     }
 }
 
@@ -322,8 +340,71 @@ impl Inventory {
     pub fn take(&mut self, idx: usize) -> Option<Item> {
         self.slots.get_mut(idx).and_then(|s| s.take())
     }
+    pub fn put_at(&mut self, idx: usize, item: Item) -> Result<(), ()> {
+        match self.slots.get_mut(idx) {
+            Some(slot) if slot.is_none() => {
+                *slot = Some(item);
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
     pub fn is_empty(&self) -> bool {
         self.slots.iter().all(|s| s.is_none())
+    }
+    /// First slot holding `kind`, if any.
+    pub fn find_kind(&self, kind: ItemKind) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|s| s.as_ref().map_or(false, |i| i.kind == kind))
+    }
+    /// First slot holding an item whose glyph matches, if any.
+    pub fn find_glyph(&self, glyph: char) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|s| s.as_ref().map_or(false, |i| i.glyph == glyph))
+    }
+}
+
+/// v0.5.7: two equipment slots — weapon + armor. Items reference the same
+/// `Item` data; the slot just records which one is currently in use. The
+/// bonus is folded into the entity's `Stats` whenever equipment changes,
+/// so combat code can keep reading from `Stats.attack_bonus / defense_bonus`.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Equipment {
+    pub weapon: Option<usize>,
+    pub armor: Option<usize>,
+}
+impl Equipment {
+    pub const fn new() -> Self {
+        Self { weapon: None, armor: None }
+    }
+
+    /// Slot of the equipped item, if the given item is currently worn.
+    pub fn slot_of(&self, inv_slot: usize) -> Option<EquipSlot> {
+        if self.weapon == Some(inv_slot) {
+            Some(EquipSlot::Weapon)
+        } else if self.armor == Some(inv_slot) {
+            Some(EquipSlot::Armor)
+        } else {
+            None
+        }
+    }
+}
+
+/// v0.5.7: distinguishes equipment slots. Inventory items are referenced
+/// by index; Equipment records which index fills which slot.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EquipSlot {
+    Weapon,
+    Armor,
+}
+impl EquipSlot {
+    pub fn accepts(self, kind: ItemKind) -> bool {
+        matches!(
+            (self, kind),
+            (EquipSlot::Weapon, ItemKind::Weapon) | (EquipSlot::Armor, ItemKind::Armor)
+        )
     }
 }
 

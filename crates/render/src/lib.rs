@@ -74,12 +74,19 @@ pub fn draw_map(frame: &mut Frame<'_>, area: ratatui::layout::Rect, map: &Dungeo
 /// - Revealed but not visible: dim
 /// - Hidden: black space
 /// - Entities on visible tiles: renderable's glyph over the dungeon tile
+///
+/// `near_pickup_tiles` is the set of (x,y) tiles within 1 step of the player
+/// that hold a ground item. Those tiles are rendered in **bold** so the player
+/// can see "you can pick this up *right now*" without confusion. Distant items
+/// are NOT highlighted on purpose — the goal is just to remove the "is this
+/// mine?" ambiguity that bit v0.5.4.
 pub fn draw_world(
     frame: &mut Frame<'_>,
     area: ratatui::layout::Rect,
     map: &Dungeon,
     world: &hecs::World,
     viewshed: &Viewshed,
+    near_pickup_tiles: &std::collections::HashSet<(i32, i32)>,
 ) {
     let buf = frame.buffer_mut();
     let w = map.width;
@@ -140,6 +147,11 @@ pub fn draw_world(
         buf[(area.x + x as u16, area.y + y as u16)]
             .set_char(render.glyph)
             .set_fg(color);
+        // v0.5.5: bold adjacent ground items so the player can spot the gold
+        // they can pick up right now. Distant items keep their normal weight.
+        if near_pickup_tiles.contains(&(x, y)) {
+            buf[(area.x + x as u16, area.y + y as u16)].set_style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD));
+        }
     }
 }
 
@@ -168,5 +180,99 @@ mod tests {
     fn dungeon_renders() {
         let _d = generate(20, 14, 99, Config::default());
         // Just smoke-test that generation + glyph lookup doesn't crash.
+    }
+
+    /// v0.5.5: ground items on the player's tile (or its 4 neighbours) must
+    /// be rendered with the BOLD modifier so the player can spot the gold
+    /// they can actually pick up right now. Items further away stay normal.
+    #[test]
+    fn draw_world_bolds_adjacent_pickups() {
+        use asciirogue_core::{Item, ItemKind, Position, Renderable, Viewshed};
+        use hecs::World;
+        use ratatui::layout::Rect;
+        use ratatui::style::Modifier;
+
+        // 5x5 all-floor dungeon — no walls, all passable.
+        let dungeon = Dungeon {
+            width: 5,
+            height: 5,
+            tiles: vec![Tile::Floor; 25],
+            rooms: vec![],
+        };
+
+        let mut world = World::new();
+        // Player at (2,2). Two gold items: one at (2,1) (adjacent), one at
+        // (0,0) (far away).
+        world.spawn((
+            Position(TilePos(2, 2)),
+            Renderable::new('@', 0xFF_D6_5A),
+            asciirogue_core::Player,
+        ));
+        world.spawn((
+            Position(TilePos(2, 1)),
+            Renderable::new('$', 0xFF_D2_46),
+            Item {
+                kind: ItemKind::Coin,
+                name: "금화".into(),
+                glyph: '$',
+                fg_rgb: 0xFF_D2_46,
+                bonus: 1,
+            },
+        ));
+        world.spawn((
+            Position(TilePos(0, 0)),
+            Renderable::new('$', 0xFF_D2_46),
+            Item {
+                kind: ItemKind::Coin,
+                name: "금화".into(),
+                glyph: '$',
+                fg_rgb: 0xFF_D2_46,
+                bonus: 1,
+            },
+        ));
+
+        // Viewshed: every tile visible AND revealed, for the test.
+        let mut vs = Viewshed::new(5, 5, 5);
+        for y in 0i32..5 {
+            for x in 0i32..5 {
+                vs.visible.push(TilePos(x, y));
+                vs.revealed[(y * 5 + x) as usize] = true;
+            }
+        }
+
+        // We can't call draw_world directly (it needs a Frame). Use
+        // ratatui's TestBackend to drive it through a real Terminal draw
+        // loop and read the resulting buffer.
+        let area = Rect::new(0, 0, 5, 5);
+        let near: std::collections::HashSet<(i32, i32)> =
+            [(2, 2), (2, 1), (1, 2), (3, 2), (2, 3)].iter().copied().collect();
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(5, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_world(frame, area, &dungeon, &world, &vs, &near);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Adjacent gold at (2,1) should be bold.
+        let adjacent = &buf[(2, 1)];
+        assert_eq!(adjacent.symbol(), "$");
+        assert!(
+            adjacent.style().add_modifier.contains(Modifier::BOLD),
+            "adjacent gold at (2,1) should be bolded: style={:?}",
+            adjacent.style()
+        );
+
+        // Far gold at (0,0) should NOT be bold.
+        let far = &buf[(0, 0)];
+        assert_eq!(far.symbol(), "$");
+        assert!(
+            !far.style().add_modifier.contains(Modifier::BOLD),
+            "distant gold at (0,0) should stay normal weight: style={:?}",
+            far.style()
+        );
     }
 }

@@ -10,10 +10,11 @@ use asciirogue_core::{
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::disable_raw_mode;
 use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
+use asciirogue::{pick_up_outcome, nearest_pickup_info, PickupOutcome};
 use hecs::World;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Span;
@@ -185,6 +186,15 @@ impl App {
                     }
                     return;
                 }
+                // Shift+4 ("$") should also trigger pickup
+                if k.code == KeyCode::Char('4') && k.modifiers.contains(KeyModifiers::SHIFT) {
+                    match pick_up_outcome(&mut self.world, self.player) {
+                        PickupOutcome::Picked => self.log("아이템을 주웠습니다."),
+                        PickupOutcome::NoItem => self.log("주울 아이템이 없습니다."),
+                        PickupOutcome::InventoryFull => self.log("인벤토리가 가득 찼습니다."),
+                    }
+                    return;
+                }
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                         self.running = false;
@@ -234,11 +244,17 @@ impl App {
                             v.revealed.iter_mut().for_each(|r| *r = false);
                         }
                     }
-                    KeyCode::Char('g') | KeyCode::Char('G') => {
-                        if try_pickup(&mut self.world, self.player) {
-                            self.log("아이템을 주웠습니다.");
-                        } else {
-                            self.log("주울 아이템이 없습니다.");
+                    KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
+                        match pick_up_outcome(&mut self.world, self.player) {
+                            PickupOutcome::Picked => {
+                                self.log("아이템을 주웠습니다.");
+                            }
+                            PickupOutcome::NoItem => {
+                                self.log("주울 아이템이 없습니다.");
+                            }
+                            PickupOutcome::InventoryFull => {
+                                self.log("인벤토리가 가득 찼습니다.");
+                            }
                         }
                     }
                     KeyCode::Char('i') | KeyCode::Char('I') => {
@@ -316,6 +332,16 @@ impl App {
             p.0 = next;
         }
         self.recompute_fov();
+        // Auto-pick up any item on the new tile (e.g., gold `$`).
+        match pick_up_outcome(&mut self.world, self.player) {
+            PickupOutcome::Picked => {
+                self.log("아이템을 주웠습니다.");
+            }
+            PickupOutcome::InventoryFull => {
+                self.log("인벤토리가 가득 찼습니다.");
+            }
+            PickupOutcome::NoItem => {}
+        }
         self.tick = self.tick.wrapping_add(1);
         self.enemy_take_turns();
     }
@@ -576,13 +602,40 @@ impl App {
         } else {
             String::from("?")
         };
+        // v0.5.5: tell the player where the nearest pickupable item is.
+        // "↓ $ 6" = "gold, 6 steps down". Empty if nothing is in range.
+        let pickup_hint = nearest_pickup_info(&self.dungeon, &self.world, self.player)
+            .map(|(dist, dir, glyph)| {
+                let arrow = match dir {
+                    Direction::Up => "↑",
+                    Direction::Down => "↓",
+                    Direction::Left => "←",
+                    Direction::Right => "→",
+                    Direction::UpLeft => "↖",
+                    Direction::UpRight => "↗",
+                    Direction::DownLeft => "↙",
+                    Direction::DownRight => "↘",
+                    Direction::None => "·",
+                };
+                let label = match glyph {
+                    '$' => "$",
+                    '!' => "!",
+                    '?' => "?",
+                    ')' => ")",
+                    '[' => "[",
+                    _ => "·",
+                };
+                format!("pickup: {} {} {}  ", arrow, label, dist)
+            })
+            .unwrap_or_default();
         let title = Paragraph::new(Span::from(format!(
-            "asciirogue — seed {}  {}  player ({},{})  visible {}  {}",
+            "asciirogue — seed {}  {}  player ({},{})  visible {}  {}{}",
             self.seed,
             self.floor_label(),
             player_pos.0,
             player_pos.1,
             visible_count,
+            pickup_hint,
             hp_mp
         )))
         .block({
@@ -617,7 +670,25 @@ impl App {
             width: inner_w,
             height: inner_h,
         };
-        draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot);
+        // v0.5.5: build the set of (x,y) tiles within 1 step of the player
+        // that hold a ground item, so the renderer can bold them.
+        let mut near_pickup_tiles: std::collections::HashSet<(i32, i32)> =
+            std::collections::HashSet::new();
+        {
+            let px = player_pos.0;
+            let py = player_pos.1;
+            // The player's own tile is always relevant if it has an item.
+            let here = (px, py);
+            // Four neighbours.
+            let neighbours = [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)];
+            for (_, (p, _it)) in self.world.query::<(&asciirogue_core::Position, &Item)>().iter() {
+                let k = (p.0.0, p.0.1);
+                if k == here || neighbours.contains(&k) {
+                    near_pickup_tiles.insert(k);
+                }
+            }
+        }
+        draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot, &near_pickup_tiles);
 
         // Footer — last few messages + control hint.
         let recent = self
@@ -1175,8 +1246,28 @@ fn parse_seed(s: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     #[test]
+    fn test_dollar_key_pickup() {
+        // Create a minimal App with a player on a tile that has a gold item ($)
+        let mut app = App::new(0);
+        // Place a gold item at player's position
+        let player_pos = app.world.get::<&Position>(app.player).unwrap().0;
+        let gold_item = Item::gold(1);
+        app.world.spawn((Position(player_pos), gold_item));
+        // Ensure inventory is empty
+        {
+            let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+            inv.slots.iter_mut().for_each(|s| *s = None);
+        }
+        // Simulate pressing '$' key
+        let ev = Event::Key(KeyEvent { code: KeyCode::Char('$'), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE });
+        app.handle(&ev);
+        // After handling, a log entry should indicate item was picked up
+        assert!(app.messages.iter().any(|m| m.contains("주웠")));
+    }
+
     fn vim_keys_map_to_directions() {
         assert_eq!(key_to_direction(&KeyCode::Char('h')), Some(Direction::Left));
         assert_eq!(key_to_direction(&KeyCode::Char('j')), Some(Direction::Down));

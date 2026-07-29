@@ -663,7 +663,22 @@ impl App {
             width: inner_w,
             height: inner_h,
         };
-        draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot);
+        // v0.5.5: highlight adjacent pickupable ground items in bold so
+        // the player can tell at a glance which tile they're standing on.
+        let mut near_pickup_tiles: std::collections::HashSet<(i32, i32)> =
+            std::collections::HashSet::new();
+        if let Ok(ppos) = self.world.get::<&Position>(self.player) {
+            let px = ppos.0.0;
+            let py = ppos.0.1;
+            let neighbours = [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)];
+            for (_, (pp, _it)) in self.world.query::<(&Position, &Item)>().iter() {
+                let k = (pp.0.0, pp.0.1);
+                if k == (px, py) || neighbours.contains(&k) {
+                    near_pickup_tiles.insert(k);
+                }
+            }
+        }
+        draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot, &near_pickup_tiles);
 
         // Footer — last few messages + control hint.
         let recent = self
@@ -1290,4 +1305,109 @@ impl App {
     pub fn messages(&self) -> &[String] {
         &self.messages
     }
+
+    /// Probe handle to the underlying dungeon.
+    pub fn dungeon_ref(&self) -> &asciirogue_procgen::Dungeon {
+        &self.dungeon
+    }
+
+    /// Current floor number (1-based).
+    pub fn floor(&self) -> u32 {
+        self.floor
+    }
+
+    /// Short summary of the nearest ground item, if any is reachable from the
+    /// player. Returns `(distance_in_steps, first_step_direction, glyph)`.
+    ///
+    /// BFS over passable (Floor) tiles. Distances cap at `MAX_PICKUP_SEARCH`
+    /// so a probe / render call doesn't walk the entire 60×24 dungeon every
+    /// frame for a missing item.
+    pub fn nearest_pickup_info(&self) -> Option<(usize, Direction, char)> {
+        nearest_pickup_info(&self.dungeon, &self.world, self.player)
+    }
+}
+
+/// Cap on how far we'll BFS for a nearby pickup — kept tight on purpose.
+/// The whole point is "if you can see it, we'll tell you how far" — items
+/// out of sight shouldn't clutter the header.
+const MAX_PICKUP_SEARCH: usize = 24;
+
+/// Walk the dungeon from the player until we hit a ground item (Item + Position
+/// entity). Returns the BFS distance in tiles, the cardinal direction of the
+/// first step toward it (so the header can say "↑ 4 steps"), and the item's
+/// glyph so the header can show what kind it is (e.g. "$ 4").
+pub fn nearest_pickup_info(
+    dungeon: &Dungeon,
+    world: &hecs::World,
+    player: hecs::Entity,
+) -> Option<(usize, Direction, char)> {
+    let start = world.get::<&Position>(player).ok()?.0;
+    if !is_passable(dungeon, start.0, start.1) {
+        return None;
+    }
+    let w = dungeon.width;
+    let h = dungeon.height;
+
+    // Precompute the set of (x,y) tiles that hold a ground item.
+    let mut item_tiles: std::collections::HashMap<(i32, i32), char> =
+        std::collections::HashMap::new();
+    for (_, (p, it)) in world.query::<(&Position, &Item)>().iter() {
+        item_tiles.insert((p.0.0, p.0.1), it.glyph);
+    }
+    if item_tiles.is_empty() {
+        return None;
+    }
+    // Item on the player's tile — trivially pickupable.
+    if let Some(&g) = item_tiles.get(&(start.0, start.1)) {
+        return Some((0, Direction::None, g));
+    }
+
+    // BFS over 4-neighborhood (we report cardinal direction of the FIRST step
+    // only, so the cardinal-direction search matches what the player will do).
+    let mut visited = vec![false; (w * h) as usize];
+    let mut prev_dir: Vec<Direction> = vec![Direction::None; (w * h) as usize];
+    let idx = |x: i32, y: i32| -> usize { (y * w + x) as usize };
+
+    let mut frontier: std::collections::VecDeque<(i32, i32, usize)> =
+        std::collections::VecDeque::new();
+    frontier.push_back((start.0, start.1, 0));
+    visited[idx(start.0, start.1)] = true;
+
+    // Cardinal-step directions: matches `Direction::{Up,Down,Left,Right}` deltas.
+    const NEIGHBORS: [(i32, i32, Direction); 4] = [
+        (0, -1, Direction::Up),
+        (0, 1, Direction::Down),
+        (-1, 0, Direction::Left),
+        (1, 0, Direction::Right),
+    ];
+
+    while let Some((x, y, d)) = frontier.pop_front() {
+        if d >= MAX_PICKUP_SEARCH {
+            break;
+        }
+        for (dx, dy, dir) in NEIGHBORS.iter() {
+            let nx = x + dx;
+            let ny = y + dy;
+            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                continue;
+            }
+            if !is_passable(dungeon, nx, ny) {
+                continue;
+            }
+            let ni = idx(nx, ny);
+            if visited[ni] {
+                continue;
+            }
+            visited[ni] = true;
+            // The first-step direction from start to (nx,ny) is `dir` if
+            // we're one step out, otherwise inherited.
+            let first_dir = if d == 0 { *dir } else { prev_dir[idx(x, y)] };
+            prev_dir[ni] = first_dir;
+            if let Some(&g) = item_tiles.get(&(nx, ny)) {
+                return Some((d + 1, first_dir, g));
+            }
+            frontier.push_back((nx, ny, d + 1));
+        }
+    }
+    None
 }

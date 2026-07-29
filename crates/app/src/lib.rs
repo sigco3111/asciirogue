@@ -142,8 +142,8 @@ impl App {
             "{} — {}",
             t_format_with_locale(I18nKey::MsgFloorEntered, locale, &startup_args),
             match locale {
-                Locale::Korean => "h/j/k/l, 화살표, yubn, > 내려가기",
-                Locale::English => "h/j/k/l, arrows, yubn, > to descend",
+                Locale::Korean => "h/j/k/l, 화살표, yubn, i 인벤토리, p 포션, > 내려가기",
+                Locale::English => "h/j/k/l, arrows, yubn, i inv, p potion, > to descend",
             }
         );
 
@@ -231,7 +231,7 @@ impl App {
                     KeyCode::Char('?') => {
                         // In-screen help (one message burst).
                         self.log("h/j/k/l 이동 | yubn 대각 | 화살표 이동".to_string());
-                        self.log("g/$ 줍기 | i 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
+                        self.log("g/$ 줍기 | i 인벤토리 | p 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
                         self.log("S 영혼 저장 | L 언어 토글 | ? 도움말".to_string());
                     }
                     KeyCode::Char('r') => {

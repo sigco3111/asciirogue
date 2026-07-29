@@ -136,8 +136,8 @@ impl App {
             "{} — {}",
             t_format_with_locale(I18nKey::MsgFloorEntered, locale, &startup_args),
             match locale {
-                Locale::Korean => "h/j/k/l, 화살표, yubn, > 내려가기",
-                Locale::English => "h/j/k/l, arrows, yubn, > to descend",
+                Locale::Korean => "h/j/k/l, 화살표, yubn, i 인벤토리, p 포션, > 내려가기",
+                Locale::English => "h/j/k/l, arrows, yubn, i inv, p potion, > to descend",
             }
         );
 
@@ -243,7 +243,7 @@ impl App {
                     KeyCode::Char('?') => {
                         // In-screen help (one message burst).
                         self.log("h/j/k/l 이동 | yubn 대각 | 화살표 이동".to_string());
-                        self.log("g 줍기 | i 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
+                        self.log("g 줍기 | i 인벤토리 | p 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
                         self.log("S 영혼 저장 | L 언어 토글 | ? 도움말".to_string());
                     }
                     KeyCode::Char('r') => {
@@ -274,19 +274,9 @@ impl App {
                         }
                     }
                     KeyCode::Char('i') => {
-                        // Quick-potion: use the first available potion in
-                        // inventory without opening the modal. Convenient for
-                        // emergency HP/MP top-ups. v0.5.7: 'I' (uppercase)
-                        // opens the inventory modal instead.
-                        if let Some(msg) = use_first_potion(&mut self.world, self.player) {
-                            self.log(msg);
-                        } else {
-                            self.log("사용할 물약이 없습니다.");
-                        }
-                    }
-                    KeyCode::Char('I') => {
-                        // v0.5.7: open inventory modal. Cursor starts on the
-                        // first non-empty slot if any, else slot 0.
+                        // v0.5.8: lowercase 'i' opens the inventory modal
+                        // (was uppercase 'I' in v0.5.7). Quick-potion is
+                        // now 'p' so the modal is one keystroke away.
                         let cursor = self
                             .world
                             .get::<&Inventory>(self.player)
@@ -294,6 +284,15 @@ impl App {
                             .and_then(|inv| inv.slots.iter().position(|s| s.is_some()))
                             .unwrap_or(0);
                         self.modal = ModalMode::Inventory { cursor };
+                    }
+                    KeyCode::Char('p') => {
+                        // Quick-potion: use the first available potion in
+                        // inventory without opening the modal.
+                        if let Some(msg) = use_first_potion(&mut self.world, self.player) {
+                            self.log(msg);
+                        } else {
+                            self.log("사용할 물약이 없습니다.");
+                        }
                     }
                     KeyCode::Char('>') => {
                         let next_floor = self.floor + 1;
@@ -444,7 +443,9 @@ impl App {
                     }
                 }
             }
-            KeyCode::Esc | KeyCode::Char('I') | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('i') | KeyCode::Char('I') | KeyCode::Char('q') => {
+                // v0.5.8: lowercase 'i' now both opens AND closes the modal.
+                // We still accept uppercase 'I' for Shift-key muscle memory.
                 self.modal = ModalMode::Closed;
             }
             _ => {}
@@ -821,9 +822,9 @@ impl App {
             .collect::<Vec<_>>()
             .join("  |  ");
         let controls_hint = if self.boss_defeated && self.floor == BOSS_FLOOR {
-            "g pick  I inv  i potion  > descend  R restart"
+            "g pick  i inv  p potion  > descend  R restart"
         } else {
-            "g pick  I inv  i potion  > descend  q quit  R restart"
+            "g pick  i inv  p potion  > descend  q quit  R restart"
         };
         let status = Paragraph::new(Span::from(format!(
             "[{}]  rooms {}  {}\n{}",
@@ -862,7 +863,7 @@ impl App {
         frame.render_widget(Clear, modal_area);
 
         let block = Block::default()
-            .title(" 인벤토리 (I / Esc: 닫기) ")
+            .title(" 인벤토리 (i / Esc: 닫기) ")
             .borders(Borders::ALL);
         frame.render_widget(block, modal_area);
 
@@ -1674,23 +1675,76 @@ mod tests {
         assert!(ground, "dropped item must spawn a ground entity");
     }
 
-    /// v0.5.7: pressing 'I' opens the inventory modal; 'Esc' closes it.
+    /// v0.5.8: pressing 'p' uses the first available potion without opening
+    /// the inventory modal — quick-potion.
     #[test]
-    fn test_inventory_modal_open_close() {
+    fn test_p_key_quick_potion() {
         let mut app = App::new(0);
-        assert!(matches!(app.modal, ModalMode::Closed));
-        let open = Event::Key(KeyEvent {
-            code: KeyCode::Char('I'),
+        // Drain HP and place a potion in slot 0.
+        app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(40, 40);
+        app.world.get::<&mut Health>(app.player).unwrap().current = 5;
+        let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+        inv.slots.iter_mut().for_each(|s| *s = None);
+        inv.put_at(0, Item::potion_hp()).unwrap();
+        drop(inv);
+        let before_hp = app.world.get::<&Health>(app.player).unwrap().current;
+        let p = Event::Key(KeyEvent {
+            code: KeyCode::Char('p'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         });
-        app.handle(&open);
+        app.handle(&p);
+        // Modal must NOT open.
         assert!(
-            matches!(app.modal, ModalMode::Inventory { .. }),
-            "I must open the modal: {:?}",
+            matches!(app.modal, ModalMode::Closed),
+            "p must not open the modal: {:?}",
             app.modal
         );
+        // HP must rise.
+        let after_hp = app.world.get::<&Health>(app.player).unwrap().current;
+        assert!(
+            after_hp > before_hp,
+            "potion must heal ({} → {})",
+            before_hp,
+            after_hp
+        );
+        // Slot must be empty.
+        let inv = app.world.get::<&Inventory>(app.player).unwrap();
+        assert!(inv.slots[0].is_none(), "potion must be consumed");
+    }
+
+    /// v0.5.8: pressing 'i' toggles the inventory modal open/close.
+    /// 'Esc' closes it. Uppercase 'I' is still accepted inside the modal
+    /// for Shift-key muscle memory, but does nothing when the modal is
+    /// closed (the dispatcher only listens for lowercase 'i' in that mode).
+    #[test]
+    fn test_inventory_modal_open_close() {
+        let mut app = App::new(0);
+        assert!(matches!(app.modal, ModalMode::Closed));
+        let i_key = Event::Key(KeyEvent {
+            code: KeyCode::Char('i'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        // 1. i opens.
+        app.handle(&i_key);
+        assert!(
+            matches!(app.modal, ModalMode::Inventory { .. }),
+            "i must open the modal: {:?}",
+            app.modal
+        );
+        // 2. i again closes (toggle).
+        app.handle(&i_key);
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "second i must close the modal (toggle): {:?}",
+            app.modal
+        );
+        // 3. i opens again; Esc closes.
+        app.handle(&i_key);
+        assert!(matches!(app.modal, ModalMode::Inventory { .. }));
         let esc = Event::Key(KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::NONE,
@@ -1701,6 +1755,20 @@ mod tests {
         assert!(
             matches!(app.modal, ModalMode::Closed),
             "Esc must close the modal: {:?}",
+            app.modal
+        );
+        // 4. Uppercase 'I' inside the modal closes it (muscle memory).
+        app.handle(&i_key);
+        let upper_i = Event::Key(KeyEvent {
+            code: KeyCode::Char('I'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        app.handle(&upper_i);
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "uppercase I inside modal must close it (muscle memory): {:?}",
             app.modal
         );
     }

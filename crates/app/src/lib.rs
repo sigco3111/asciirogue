@@ -249,8 +249,22 @@ impl App {
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            // v0.5.16: n/Esc cancels, but if the player is
+                            // still standing on the stairs tile, re-show
+                            // the modal so they can answer again. This is
+                            // the recovery UX for pressing n by mistake.
                             self.modal = ModalMode::Closed;
-                            self.at_stairs = false;
+                            let player_pos = self.world.get::<&Position>(self.player).ok().map(|p| p.0);
+                            let on_stairs = player_pos
+                                .map(|p| matches!(self.dungeon.at(p.0, p.1), Tile::StairsDown))
+                                .unwrap_or(false);
+                            if on_stairs {
+                                self.modal = ModalMode::ConfirmStairs;
+                                self.modal_redraws = 4;
+                                self.at_stairs = true;
+                            } else {
+                                self.at_stairs = false;
+                            }
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                         }
                         _ => {
@@ -2187,6 +2201,16 @@ mod confirm_stairs_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let (sx, sy) = put_player_on_stairs(&mut app);
         clear_items(&mut app, sx, sy);
+        // v0.5.16: to test "n cancels + modal closes", we must move the
+        // player OFF the stairs first. Otherwise v0.5.16's recovery UX
+        // re-triggers the modal because the player is still standing on
+        // the descent.
+        let first = app.dungeon.rooms.first().unwrap();
+        let (fx, fy) = first.center();
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(fx, fy);
+        }
         app.modal = ModalMode::ConfirmStairs;
         let start_floor = app.floor;
         app.handle(&char_event('n'));
@@ -2204,6 +2228,13 @@ mod confirm_stairs_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let (sx, sy) = put_player_on_stairs(&mut app);
         clear_items(&mut app, sx, sy);
+        // v0.5.16: move player off stairs so esc doesn't re-trigger.
+        let first = app.dungeon.rooms.first().unwrap();
+        let (fx, fy) = first.center();
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(fx, fy);
+        }
         app.modal = ModalMode::ConfirmStairs;
         let start_floor = app.floor;
         let esc = Event::Key(KeyEvent {
@@ -2368,15 +2399,23 @@ mod modal_redraws_tests {
         assert_eq!(app.modal_redraws, 0, "y must clear modal_redraws");
     }
 
-    /// v0.5.14: answering n clears modal_redraws to 0.
+    /// v0.5.14: answering n clears modal_redraws to 0 when the player
+    /// is off the stairs. v0.5.16: when still on stairs, n re-triggers
+    /// the modal and modal_redraws is bumped back to 4.
     #[test]
-    fn answering_n_clears_modal_redraws() {
+    fn answering_n_clears_modal_redraws_when_off_stairs() {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
         app.handle(&char_event('~'));
-        assert!(app.modal_redraws > 0);
+        // Move off stairs.
+        let first = app.dungeon.rooms.first().unwrap();
+        let (fx, fy) = first.center();
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(fx, fy);
+        }
         app.handle(&char_event('n'));
-        assert_eq!(app.modal_redraws, 0, "n must clear modal_redraws");
+        assert_eq!(app.modal_redraws, 0, "n must clear modal_redraws when off stairs");
     }
 }
 
@@ -2424,15 +2463,41 @@ mod at_stairs_tests {
         assert!(!app.at_stairs, "y must clear at_stairs");
     }
 
-    /// v0.5.15: answering n clears at_stairs (and stays on floor).
+    /// v0.5.15: n clears at_stairs only if the player is OFF the stairs.
+    /// v0.5.16: if the player is still on the stairs, n re-triggers the
+    /// modal and keeps at_stairs true (recovery UX).
     #[test]
-    fn answering_n_clears_at_stairs() {
+    fn answering_n_keeps_at_stairs_when_on_stairs() {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
         app.handle(&char_event('~'));
         assert!(app.at_stairs);
         app.handle(&char_event('n'));
-        assert!(!app.at_stairs, "n must clear at_stairs");
+        // Still on stairs → v0.5.16 keeps at_stairs true.
+        assert!(app.at_stairs, "n must keep at_stairs when on stairs");
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
+            "n must re-trigger modal when still on stairs");
+    }
+
+    /// v0.5.16: n clears at_stairs when the player has walked off the
+    /// stairs tile before answering.
+    #[test]
+    fn answering_n_clears_at_stairs_when_off_stairs() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        // Move player off stairs.
+        let first = app.dungeon.rooms.first().unwrap();
+        let (fx, fy) = first.center();
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(fx, fy);
+        }
+        app.handle(&char_event('n'));
+        // Off stairs → modal closed, at_stairs cleared.
+        assert!(!app.at_stairs, "n must clear at_stairs when off stairs");
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "n must close modal when off stairs");
     }
 
     /// v0.5.15: modal_redraws is bumped to 4 frames for stability.
@@ -2445,5 +2510,59 @@ mod at_stairs_tests {
             app.modal_redraws, 4,
             "modal_redraws should be 4 to give the popup enough visibility"
         );
+    }
+}
+
+#[cfg(test)]
+mod modal_recovery_tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn char_event(c: char) -> Event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn put_player_on_stairs(app: &mut App) -> (i32, i32) {
+        let last = app.dungeon.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
+        let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+        pos.0 = TilePos(sx, sy);
+        (sx, sy)
+    }
+
+    /// v0.5.16: pressing n while standing on the stairs should NOT leave
+    /// the modal closed. The modal should re-show so the player can answer
+    /// again. This is the recovery UX for pressing n by mistake.
+    #[test]
+    fn n_while_on_stairs_reopens_modal() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        // Trigger the modal via debug warp.
+        app.handle(&char_event('~'));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        // Cancel with n.
+        app.handle(&char_event('n'));
+        // v0.5.16: should re-trigger the modal since player is still on stairs.
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
+            "n while on stairs should re-trigger the modal");
+        assert!(app.at_stairs, "at_stairs should still be true");
+    }
+
+    /// v0.5.16: after answering y, the player descends — modal closes
+    /// and at_stairs is cleared. No re-trigger (player is on a new floor).
+    #[test]
+    fn y_answers_descend_and_clears() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let _ = put_player_on_stairs(&mut app);
+        app.handle(&char_event('~'));
+        app.handle(&char_event('y'));
+        assert!(matches!(app.modal, ModalMode::Closed));
+        assert!(!app.at_stairs);
     }
 }

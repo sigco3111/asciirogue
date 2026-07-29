@@ -261,8 +261,22 @@ impl App {
                             self.descend_internal();
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            // v0.5.16: n/Esc cancels, but if the player is
+                            // still standing on the stairs tile, re-show
+                            // the modal so they can answer again. Recovery
+                            // UX for pressing n by mistake.
                             self.modal = ModalMode::Closed;
-                            self.at_stairs = false;
+                            let player_pos = self.world.get::<&Position>(self.player).ok().map(|p| p.0);
+                            let on_stairs = player_pos
+                                .map(|p| matches!(self.dungeon.at(p.0, p.1), Tile::StairsDown))
+                                .unwrap_or(false);
+                            if on_stairs {
+                                self.modal = ModalMode::ConfirmStairs;
+                                self.modal_redraws = 4;
+                                self.at_stairs = true;
+                            } else {
+                                self.at_stairs = false;
+                            }
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                         }
                         _ => {}

@@ -5,6 +5,28 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.16 — n-cancel recovery: re-show modal when still on stairs
+
+User scenario: arrived at stairs, modal opened, pressed `n` to cancel,
+then pressed `l` to step forward — but the modal never came back even
+though the player was still on the stairs tile (the next step took
+them OFF the stairs, so the natural arrival trigger didn't fire).
+
+v0.5.16 adds **recovery UX**: after `n`/`Esc`, if the player is still
+standing on the stairs tile, the modal re-opens immediately so they
+can answer again. This is the "I pressed n by mistake" path.
+
+- Modal handler checks `Tile::StairsDown` at the player's current
+  position after cancel. If still on stairs, re-trigger
+  `ModalMode::ConfirmStairs` with `modal_redraws = 4` and `at_stairs = true`.
+- Updated 4 existing tests to move the player off stairs before
+  testing the cancel path (otherwise the new behavior would falsely
+  pass).
+- Added 2 new tests in `modal_recovery_tests`:
+  - `n_while_on_stairs_reopens_modal`
+  - `y_answers_descend_and_clears`
+- Total: **76 passed / 0 failed**.
+
 ### v0.5.15 — Stairs "▼ 도착!" badge + 4-frame visibility
 
 - User verified (`~` debug warp) modal handler works correctly. The

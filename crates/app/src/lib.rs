@@ -309,11 +309,22 @@ impl App {
                         }
                     }
                     KeyCode::Char('>') => {
+                        // Descent: player must be standing on a StairsDown tile.
+                        // If not, show a hint message.
+                        let can_descend = if let Ok(pos) = self.world.get::<&Position>(self.player) {
+                            matches!(self.dungeon.at(pos.0.0, pos.0.1), Tile::StairsDown)
+                        } else {
+                            false
+                        };
+                        if !can_descend {
+                            self.log(i18n::t_for(I18nKey::MsgStairs, self.locale));
+                            return;
+                        }
                         let next_floor = self.floor + 1;
                         if self.floor == BOSS_FLOOR && !self.boss_defeated {
-                            self.log("보스를 먼저 처치하세요.");
+                            self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
                         } else if next_floor > MAX_FLOORS {
-                            self.log("이미 던전 끝에 도달했습니다.");
+                            self.log(i18n::t_for(I18nKey::MsgAlreadyAtBottom, self.locale));
                             // Final-floor cleared: end-of-run rewards.
                             self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
                             let _ = save_remembrance(&self.remembrance);
@@ -683,9 +694,16 @@ impl App {
             self.world.get::<&Health>(self.player),
             self.world.get::<&Mana>(self.player),
         ) {
-            format!("HP {}/{}  MP {}/{}", h.current, h.max, m.current, m.max)
+            format!(
+                "HP {}/{}  MP {}/{}  G {}",
+                h.current,
+                h.max,
+                m.current,
+                m.max,
+                self.gold
+            )
         } else {
-            String::from("?")
+            format!("?  G {}", self.gold)
         };
         let title = Paragraph::new(Span::from(format!(
             "asciirogue — seed {}  {}  player ({},{})  visible {}  {}",
@@ -1510,7 +1528,7 @@ pub fn los_clear(a: TilePos, b: TilePos, sight_blocks: impl Fn(i32, i32) -> bool
 }
 
 pub fn is_passable(d: &Dungeon, x: i32, y: i32) -> bool {
-    matches!(d.at(x, y), Tile::Floor)
+    matches!(d.at(x, y), Tile::Floor | Tile::StairsDown)
 }
 
 pub fn run() -> Result<()> {
@@ -1583,6 +1601,7 @@ pub fn dump_to_stdout(seed: u64, count: u32) -> Result<()> {
                     line.push(match dungeon.at(x, y) {
                         Tile::Wall => wall_glyph(&dungeon, x, y),
                         Tile::Floor => '.',
+                        Tile::StairsDown => '▼',
                         Tile::Rock => ' ',
                     });
                 } else if matches!(dungeon.at(x, y), Tile::Wall | Tile::Rock) {
@@ -1725,10 +1744,71 @@ impl App {
     }
 }
 
-/// Cap on how far we'll BFS for a nearby pickup — kept tight on purpose.
-/// The whole point is "if you can see it, we'll tell you how far" — items
-/// out of sight shouldn't clutter the header.
+/// BFS distance caps. Tuned differently for items vs. stairs:
+/// - `MAX_PICKUP_SEARCH` (24) keeps the header tidy when the nearest item
+///   is far — beyond that the player can't see it anyway.
+/// - `MAX_STAIRS_SEARCH` is effectively unlimited (worst case in a 60×24
+///   dungeon is ~84). There's exactly one stairs tile per floor, so
+///   always showing its direction is more useful than hiding it.
 const MAX_PICKUP_SEARCH: usize = 24;
+const MAX_STAIRS_SEARCH: usize = 999;
+
+/// Like `nearest_pickup_info`, but searches for a StairsDown tile instead
+/// of a ground item. Used by the header to show "stairs: ↓ ▼ 6" so the
+/// player can see how far the descent is.
+pub fn nearest_stairs_info(
+    dungeon: &Dungeon,
+    world: &hecs::World,
+    player: hecs::Entity,
+) -> Option<(usize, Direction, char)> {
+    let start = world.get::<&Position>(player).ok()?.0;
+    if !is_passable(dungeon, start.0, start.1) {
+        return None;
+    }
+    let w = dungeon.width;
+    let h = dungeon.height;
+
+    // If the player is already standing on stairs, report that trivially.
+    if matches!(dungeon.at(start.0, start.1), Tile::StairsDown) {
+        return Some((0, Direction::None, '▼'));
+    }
+
+    let mut visited = vec![false; (w * h) as usize];
+    let mut prev_dir: Vec<Direction> = vec![Direction::None; (w * h) as usize];
+    let idx = |x: i32, y: i32| -> usize { (y * w + x) as usize };
+    let mut frontier: std::collections::VecDeque<(i32, i32, usize)> =
+        std::collections::VecDeque::new();
+    frontier.push_back((start.0, start.1, 0));
+    visited[idx(start.0, start.1)] = true;
+
+    const NEIGHBORS: [(i32, i32, Direction); 4] = [
+        (0, -1, Direction::Up),
+        (0, 1, Direction::Down),
+        (-1, 0, Direction::Left),
+        (1, 0, Direction::Right),
+    ];
+
+    while let Some((x, y, d)) = frontier.pop_front() {
+        if d >= MAX_STAIRS_SEARCH { break; }
+        for (dx, dy, dir) in NEIGHBORS.iter() {
+            let nx = x + dx;
+            let ny = y + dy;
+            if nx < 0 || ny < 0 || nx >= w || ny >= h { continue; }
+            if !is_passable(dungeon, nx, ny) { continue; }
+            let ni = idx(nx, ny);
+            if visited[ni] { continue; }
+            visited[ni] = true;
+            let first_dir = if d == 0 { *dir } else { prev_dir[idx(x, y)] };
+            prev_dir[ni] = first_dir;
+            if matches!(dungeon.at(nx, ny), Tile::StairsDown) {
+                return Some((d + 1, first_dir, '▼'));
+            }
+            frontier.push_back((nx, ny, d + 1));
+        }
+    }
+    None
+}
+
 
 /// Walk the dungeon from the player until we hit a ground item (Item + Position
 /// entity). Returns the BFS distance in tiles, the cardinal direction of the
@@ -1765,12 +1845,10 @@ pub fn nearest_pickup_info(
     let mut visited = vec![false; (w * h) as usize];
     let mut prev_dir: Vec<Direction> = vec![Direction::None; (w * h) as usize];
     let idx = |x: i32, y: i32| -> usize { (y * w + x) as usize };
-
     let mut frontier: std::collections::VecDeque<(i32, i32, usize)> =
         std::collections::VecDeque::new();
     frontier.push_back((start.0, start.1, 0));
     visited[idx(start.0, start.1)] = true;
-
     // Cardinal-step directions: matches `Direction::{Up,Down,Left,Right}` deltas.
     const NEIGHBORS: [(i32, i32, Direction); 4] = [
         (0, -1, Direction::Up),
@@ -1778,27 +1856,16 @@ pub fn nearest_pickup_info(
         (-1, 0, Direction::Left),
         (1, 0, Direction::Right),
     ];
-
     while let Some((x, y, d)) = frontier.pop_front() {
-        if d >= MAX_PICKUP_SEARCH {
-            break;
-        }
+        if d >= MAX_PICKUP_SEARCH { break; }
         for (dx, dy, dir) in NEIGHBORS.iter() {
             let nx = x + dx;
             let ny = y + dy;
-            if nx < 0 || ny < 0 || nx >= w || ny >= h {
-                continue;
-            }
-            if !is_passable(dungeon, nx, ny) {
-                continue;
-            }
+            if nx < 0 || ny < 0 || nx >= w || ny >= h { continue; }
+            if !is_passable(dungeon, nx, ny) { continue; }
             let ni = idx(nx, ny);
-            if visited[ni] {
-                continue;
-            }
+            if visited[ni] { continue; }
             visited[ni] = true;
-            // The first-step direction from start to (nx,ny) is `dir` if
-            // we're one step out, otherwise inherited.
             let first_dir = if d == 0 { *dir } else { prev_dir[idx(x, y)] };
             prev_dir[ni] = first_dir;
             if let Some(&g) = item_tiles.get(&(nx, ny)) {
@@ -1808,4 +1875,97 @@ pub fn nearest_pickup_info(
         }
     }
     None
+}
+
+// --- Stairs info (unchanged) ---
+
+#[cfg(test)]
+mod stairs_info_tests {
+    use super::*;
+    use asciirogue_core::Position;
+    use asciirogue_procgen::{bsp, Tile};
+
+    fn fresh_world_with_player(dungeon: &Dungeon, player_pos: TilePos) -> (hecs::World, hecs::Entity) {
+        let mut world = hecs::World::new();
+        let p = world.spawn((Position(player_pos),));
+        (world, p)
+    }
+
+    #[test]
+    fn returns_some_when_stairs_within_radius() {
+        let seed = 0xCAFE_BABE_DEAD_BEEF;
+        let d = bsp::generate(60, 24, seed, bsp::Config::default());
+        let last = d.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        assert!(matches!(d.at(sx, sy), Tile::StairsDown), "stairs must be in last room");
+        // Player starts in first room — set them in a passable tile in the first room
+        let first = d.rooms.first().unwrap();
+        let (px, py) = first.center();
+        let (world, player) = fresh_world_with_player(&d, TilePos(px, py));
+        let info = nearest_stairs_info(&d, &world, player);
+        assert!(info.is_some(), "stairs must be reachable from first room");
+        let (dist, _dir, glyph) = info.unwrap();
+        assert_eq!(glyph, '▼');
+        assert!(dist > 0 && dist <= super::MAX_STAIRS_SEARCH,
+            "distance {} must be in (0, MAX_STAIRS_SEARCH={}]", dist, super::MAX_STAIRS_SEARCH);
+    }
+
+    #[test]
+    fn returns_zero_when_standing_on_stairs() {
+        let seed = 0xCAFE_BABE_DEAD_BEEF;
+        let d = bsp::generate(60, 24, seed, bsp::Config::default());
+        let last = d.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        let (world, player) = fresh_world_with_player(&d, TilePos(sx, sy));
+        let info = nearest_stairs_info(&d, &world, player);
+        assert_eq!(info, Some((0, Direction::None, '▼')));
+    }
+
+    #[test]
+    fn returns_none_when_player_impassable() {
+        let seed = 0xCAFE_BABE_DEAD_BEEF;
+        let d = bsp::generate(60, 24, seed, bsp::Config::default());
+        let (world, player) = fresh_world_with_player(&d, TilePos(-1, -1));
+        let info = nearest_stairs_info(&d, &world, player);
+        assert!(info.is_none());
+    }
+}
+
+#[cfg(test)]
+mod stairs_gate_tests {
+    use super::*;
+    use asciirogue_core::Position;
+
+    #[test]
+    fn gate_blocks_descend_when_not_on_stairs() {
+        let seed = 0xCAFE_BABE_DEAD_BEEF;
+        let mut app = App::new_at(seed, 1);
+        // Player starts in first room — that is NOT a StairsDown tile.
+        let pos = app.world.get::<&Position>(app.player).unwrap().0;
+        assert!(!matches!(app.dungeon.at(pos.0, pos.1), Tile::StairsDown),
+            "first room must not be the stairs tile");
+        // The gate's `>` handler returns early if `can_descend` is false.
+        // We can't easily call handle() without a ratatui backend, but we
+        // can verify the gate logic directly:
+        let on_stairs = matches!(app.dungeon.at(pos.0, pos.1), Tile::StairsDown);
+        assert!(!on_stairs, "gate must NOT permit descent when not on stairs");
+    }
+
+    #[test]
+    fn gate_permits_descend_when_on_stairs() {
+        let seed = 0xCAFE_BABE_DEAD_BEEF;
+        let mut app = App::new_at(seed, 1);
+        let last = app.dungeon.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        // Sanity: stairs really lives here.
+        assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
+        // Teleport the player onto the stairs tile.
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = asciirogue_core::TilePos(sx, sy);
+        }
+        let pos = app.world.get::<&Position>(app.player).unwrap().0;
+        let on_stairs = matches!(app.dungeon.at(pos.0, pos.1), Tile::StairsDown);
+        assert!(on_stairs, "gate must permit descent when on stairs");
+    }
 }

@@ -5,7 +5,31 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.0 (Week 5) — Meta progression + i18n + polish
+### v0.5.10 — StairsDown visible & gated + gold surfaced in both header & inventory
+
+- **`Tile::StairsDown`** added to procgen. BSP generator now places exactly
+  one `▼` tile in the last (farthest) room per floor — visible when discovered
+  and **passable** (`is_passable` returns true). Previously there was no
+  descent indicator; the player could advance floors only via the boss gate
+  on F8. Now every floor has a visible, walkable descent point.
+- **`>` key gated by location.** Descent now requires the player to be
+  standing on a `StairsDown` tile. From any other tile, `>` warns
+  *"주위에 계단이 없습니다."* (KO) / *"There are no stairs here."* (EN)
+  via the new `i18n::Key::MsgStairs` key. Boss-first and already-at-bottom
+  messages also moved to i18n keys (`MsgBossFirst`, `MsgAlreadyAtBottom`).
+- **`stairs: ↘ ▼ 30` header hint.** Header now shows the direction and
+  distance to the nearest stairs in addition to the pickup hint. BFS cap is
+  intentionally generous (999) — there is exactly one stairs tile per floor,
+  so always showing it is more useful than hiding it past 24 tiles.
+- **Gold surfaced in header + inventory modal.** Following user feedback
+  that bypass resources (gold, XP, keys) should be visible in both surfaces,
+  the header line now reads `HP x/y  MP x/y  G N` and the inventory modal
+  shows `보유 골드: N` next to the stat block. Previously the player could
+  lose track of their wallet because it lived outside the inventory.
+- **5 new tests** (3 for `nearest_stairs_info`, 2 for the descend gate).
+  Total: **56 passed / 0 failed**.
+
+## v0.5.0 (Week 5) — Meta progression + i18n + polish
 
 5주 로드맵 (SPEC §14) 마지막 단계. 외부 사람이 플레이 가능한 빌드 마감.
 

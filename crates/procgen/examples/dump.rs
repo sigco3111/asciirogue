@@ -14,6 +14,7 @@ fn main() {
             line.push(match dungeon.at(x, y) {
                 asciirogue_procgen::Tile::Wall  => wall_glyph(&dungeon, x, y),
                 asciirogue_procgen::Tile::Floor => '.',
+                asciirogue_procgen::Tile::StairsDown => '▼',
                 asciirogue_procgen::Tile::Rock  => ' ',
             });
         }

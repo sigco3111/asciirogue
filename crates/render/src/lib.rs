@@ -60,7 +60,8 @@ pub fn draw_map(frame: &mut Frame<'_>, area: ratatui::layout::Rect, map: &Dungeo
             let tile = map.at(wx, wy);
             let (symbol, color) = match tile {
                 Tile::Wall => (wall_glyph(map, wx, wy), Color::Rgb(180, 180, 200)),
-                Tile::Floor => ('·', Color::Rgb(110, 110, 130)),
+                Tile::Floor => ('.', Color::Rgb(110, 110, 130)),
+                Tile::StairsDown => ('\u{25bc}', Color::Rgb(255, 215, 0)),
                 Tile::Rock => (' ', Color::Reset),
             };
             buf[(area.x + x, area.y + y)].set_char(symbol).set_fg(color);
@@ -115,13 +116,15 @@ pub fn draw_world(
             let (symbol, color) = if is_visible {
                 match map.at(wx, wy) {
                     Tile::Wall => (wall_glyph(map, wx, wy), Color::Rgb(180, 180, 200)),
-                    Tile::Floor => ('·', Color::Rgb(140, 140, 170)),
+                    Tile::Floor => ('·', Color::Rgb(110, 110, 130)),
+                    Tile::StairsDown => ('\u{25bc}', Color::Rgb(255, 215, 0)),
                     Tile::Rock => ('#', Color::Rgb(80, 80, 90)),
                 }
             } else if is_revealed {
                 match map.at(wx, wy) {
                     Tile::Wall => (wall_glyph(map, wx, wy), Color::Rgb(60, 60, 70)),
                     Tile::Floor => ('·', Color::Rgb(40, 40, 50)),
+                    Tile::StairsDown => ('\u{25bc}', Color::Rgb(255, 215, 0)),
                     Tile::Rock => (' ', Color::Reset),
                 }
             } else {

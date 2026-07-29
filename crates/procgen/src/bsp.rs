@@ -168,10 +168,17 @@ pub fn generate(width: i32, height: i32, seed: u64, cfg: Config) -> Dungeon {
     build(&mut root, &mut rng, &cfg, 0);
     collect_rooms(&root, &mut dungeon.rooms);
     let rooms_snapshot = dungeon.rooms.clone();
-    for r in rooms_snapshot {
-        dungeon.carve_room(r);
+    for r in &rooms_snapshot {
+        dungeon.carve_room(*r);
     }
     connect(&root, &mut dungeon);
+    // After connecting corridors, place a StairsDown tile in the last room (farthest from start).
+    // Use the last room in `rooms_snapshot` (which is farthest due to BSP ordering).
+    if let Some(last_room) = rooms_snapshot.last() {
+        let (cx, cy) = last_room.center();
+        // Place stairs on that tile; if a boss later occupies it (BOSS_FLOOR), the boss entity will sit on stairs.
+        dungeon.set(cx, cy, Tile::StairsDown);
+    }
     dungeon
 }
 

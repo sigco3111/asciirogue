@@ -15,8 +15,8 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
 use asciirogue::{
-    drop_inventory_at, nearest_pickup_info, pick_up_outcome, toggle_equip_at, use_inventory_at,
-    ModalMode, PickupOutcome,
+    drop_inventory_at, nearest_pickup_info, nearest_stairs_info, pick_up_outcome, toggle_equip_at,
+    use_inventory_at, ModalMode, PickupOutcome,
 };
 use hecs::World;
 use ratatui::layout::{Constraint, Layout};
@@ -773,9 +773,16 @@ impl App {
             self.world.get::<&Health>(self.player),
             self.world.get::<&Mana>(self.player),
         ) {
-            format!("HP {}/{}  MP {}/{}", h.current, h.max, m.current, m.max)
+            format!(
+                "HP {}/{}  MP {}/{}  G {}",
+                h.current,
+                h.max,
+                m.current,
+                m.max,
+                self.gold
+            )
         } else {
-            String::from("?")
+            format!("?  G {}", self.gold)
         };
         // v0.5.5: tell the player where the nearest pickupable item is.
         // "↓ $ 6" = "gold, 6 steps down". Empty if nothing is in range.
@@ -803,13 +810,31 @@ impl App {
                 format!("pickup: {} {} {}  ", arrow, label, dist)
             })
             .unwrap_or_default();
+        // Build stairs hint similar to pickup hint.
+        let stairs_hint = nearest_stairs_info(&self.dungeon, &self.world, self.player)
+            .map(|(dist, dir, glyph)| {
+                let arrow = match dir {
+                    Direction::Up => "↑",
+                    Direction::Down => "↓",
+                    Direction::Left => "←",
+                    Direction::Right => "→",
+                    Direction::UpLeft => "↖",
+                    Direction::UpRight => "↗",
+                    Direction::DownLeft => "↙",
+                    Direction::DownRight => "↘",
+                    Direction::None => "·",
+                };
+                format!("stairs: {} {} {}  ", arrow, glyph, dist)
+            })
+            .unwrap_or_default();
         let title = Paragraph::new(Span::from(format!(
-            "asciirogue — seed {}  {}  player ({},{})  visible {}  {}{}",
+            "asciirogue — seed {}  {}  player ({},{})  visible {}  {}{}{}",
             self.seed,
             self.floor_label(),
             player_pos.0,
             player_pos.1,
             visible_count,
+            stairs_hint,
             pickup_hint,
             hp_mp
         )))
@@ -925,8 +950,8 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(10), // slot list
-                Constraint::Length(2),  // spacer
-                Constraint::Length(2),  // equipped + stats
+                Constraint::Length(1),  // spacer
+                Constraint::Length(3),  // equipped + stats + gold
                 Constraint::Min(1),    // controls
             ])
             .split(inner);
@@ -995,9 +1020,13 @@ impl App {
             let stats = self.world.get::<&Stats>(self.player).ok();
             if let Some(s) = stats {
                 lines.push(Line::from(format!(
-                    "공격 보너스: {:+}    방어 보너스: {:+}",
-                    s.attack_bonus, s.defense_bonus
+                    "공격 보너스: {:+}    방어 보너스: {:+}    보유 골드: {}",
+                    s.attack_bonus,
+                    s.defense_bonus,
+                    self.gold
                 )));
+            } else {
+                lines.push(Line::from(format!("보유 골드: {}", self.gold)));
             }
             lines
         };
@@ -1472,6 +1501,7 @@ fn dump_to_stdout(seed: u64, count: u32) -> Result<()> {
                     line.push(match dungeon.at(x, y) {
                         Tile::Wall => wall_glyph(&dungeon, x, y),
                         Tile::Floor => '.',
+                        Tile::StairsDown => '▼',
                         Tile::Rock => ' ',
                     });
                 } else if matches!(dungeon.at(x, y), Tile::Wall | Tile::Rock) {

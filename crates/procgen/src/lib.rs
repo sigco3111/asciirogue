@@ -15,11 +15,15 @@ pub enum Tile {
     Floor,
     /// Impassable (boundary or pillar).
     Rock,
+    /// v0.5.10: stairs leading to the next floor. Passable (you can stand on
+    /// it) and visually distinct (▼ glyph). Exactly one is placed per floor
+    /// by `bsp::generate`, in the last (farthest) room.
+    StairsDown,
 }
 
 impl Tile {
     pub fn is_passable(self) -> bool {
-        matches!(self, Tile::Floor)
+        matches!(self, Tile::Floor | Tile::StairsDown)
     }
 }
 

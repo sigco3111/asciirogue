@@ -238,10 +238,16 @@ impl App {
                         // `g` is the documented pickup key; `$` (gold sign) and
                         // `,` are intuitive aliases the player will reach
                         // for when they see a $ glyph.
-                        if try_pickup(&mut self.world, self.player) {
-                            self.log("아이템을 주웠습니다.");
-                        } else {
-                            self.log("주울 아이템이 없습니다.");
+                        match pick_up_outcome(&mut self.world, self.player) {
+                            PickupOutcome::Picked => {
+                                self.log("아이템을 주웠습니다.");
+                            }
+                            PickupOutcome::NoItem => {
+                                self.log("주울 아이템이 없습니다.");
+                            }
+                            PickupOutcome::InventoryFull => {
+                                self.log("인벤토리가 가득 찼습니다.");
+                            }
                         }
                     }
                     KeyCode::Char('i') | KeyCode::Char('I') => {
@@ -910,59 +916,90 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
 
 /// Pick up an item lying on the ground at the player's tile (key `g`).
 pub fn try_pickup(world: &mut World, player: hecs::Entity) -> bool {
+    matches!(pick_up_outcome(world, player), PickupOutcome::Picked)
+}
+
+/// Distinguishes "no item here" from "inventory full" so the caller
+/// can show a useful message either way.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PickupOutcome {
+    /// Nothing on the ground to pick up at the player's tile.
+    NoItem,
+    /// Picked up at least one item this call.
+    Picked,
+    /// There are items here but the inventory is full — ground untouched.
+    InventoryFull,
+}
+
+/// Tri-state pickup. Caller should display a distinct message per arm.
+pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome {
     let player_pos = match world.get::<&Position>(player) {
         Ok(p) => p.0,
-        Err(_) => return false,
+        Err(_) => return PickupOutcome::NoItem,
     };
-    // Collect entity ids at the player's tile that carry an Item.
-    let mut item_entities: Vec<hecs::Entity> = Vec::new();
-    let to_check: Vec<hecs::Entity> = world
+    // Items at the player's tile (in entity-id order so it's stable).
+    let item_entities: Vec<hecs::Entity> = world
         .query::<(&Position, &Item)>()
         .iter()
         .filter_map(|(e, (p, _))| if p.0 == player_pos { Some(e) } else { None })
         .collect();
-    for e in to_check {
-        item_entities.push(e);
-    }
     if item_entities.is_empty() {
-        return false;
+        return PickupOutcome::NoItem;
     }
 
-    // Pull the items out one at a time so each `Ref` is released before the
-    // next borrow. Inventory is mutated AFTER all items are cloned.
-    let mut items_to_put: Vec<Item> = Vec::with_capacity(item_entities.len());
-    let mut picked = Vec::new();
+    // Clone each ground item out (one borrow at a time), remember which
+    // entity each came from. We then push into Inventory one at a time;
+    // the first failure (Inventory full) breaks and we leave every
+    // remaining ground entity on the floor.
+    let mut items_to_put: Vec<(hecs::Entity, Item)> = Vec::new();
     for e in item_entities {
-        // Borrow `&Item`, clone, drop the Ref, then push to despawn queue.
-        let cloned = match world.get::<&Item>(e) {
-            Ok(r) => Some((*r).clone()),
-            Err(_) => None,
-        };
-        if let Some(item) = cloned {
-            items_to_put.push(item);
-            picked.push(e);
+        if let Ok(r) = world.get::<&Item>(e) {
+            items_to_put.push((e, (*r).clone()));
         }
     }
-    // Free refs before mutating Inventory.
-    drop(world.get::<&Health>(player)); // no-op placeholder that runs; ok
-    // Now push into Inventory.
+    drop(world.get::<&Health>(player)); // release any lingering refs
     let mut inv = world.get::<&mut Inventory>(player).ok().unwrap();
-    for item in items_to_put {
-        if inv.push(item).is_err() {
-            // Inventory full — keep the corresponding entity on the ground.
-            if let Some(e) = picked.pop() {
-                // We over-counted by one; ignore — leaving the item where it is.
+    // Walk through items; on the first Inventory full, stop. Either all
+    // got in (Picked) or none did (InventoryFull).
+    let mut inserted = 0usize;
+    let mut inventory_full = false;
+    for (e, item) in items_to_put.drain(..) {
+        match inv.push(item) {
+            Ok(_) => inserted += 1,
+            Err(()) => {
+                inventory_full = true;
+                // The item that failed to insert stays in `e` on the ground;
+                // we don't despawn it. Items we already inserted also
+                // remain in the inventory.
                 let _ = e;
+                break;
             }
-            break;
         }
     }
     drop(inv);
-    let count = picked.len();
-    for e in picked {
-        let _ = world.despawn(e);
+    // Now despawn the ground entities we successfully inserted.
+    // We tracked them as the *prefix* of `items_to_put` of length
+    // `inserted`, but since we drained the vec while pushing we no longer
+    // have them around in order. Rebuild the despawn list by recursing
+    // the ground items again.
+    if inserted > 0 {
+        let to_despawn: Vec<hecs::Entity> = world
+            .query::<(&Position, &Item)>()
+            .iter()
+            .filter_map(|(e, (p, _))| if p.0 == player_pos { Some(e) } else { None })
+            .take(inserted)
+            .collect();
+        for e in to_despawn {
+            let _ = world.despawn(e);
+        }
     }
-    count > 0
+    if inventory_full {
+        PickupOutcome::InventoryFull
+    } else if inserted > 0 {
+        PickupOutcome::Picked
+    } else {
+        PickupOutcome::NoItem
+    }
 }
 
 /// Use the first available potion in the inventory (key `i`).
@@ -1241,6 +1278,12 @@ impl App {
     /// Access the world's ECS state for probes.
     pub fn world_ref(&self) -> &hecs::World {
         &self.world
+    }
+
+    /// Mutable access for probe / test code that needs to teleport the
+    /// player or otherwise alter world state directly.
+    pub fn world_mut(&mut self) -> &mut hecs::World {
+        &mut self.world
     }
 
     /// Read-only view of the message log.

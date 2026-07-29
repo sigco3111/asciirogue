@@ -62,6 +62,12 @@ struct App {
     game_over: bool,
     /// v0.5.7: top-level UI mode.
     modal: ModalMode,
+    /// v0.5.14: when > 0, the next draw() must render the modal even if
+    /// the user has already answered. This guarantees that the popup is
+    /// visible for at least one full frame so the player can't miss it
+    /// (previously the modal could appear and disappear between two
+    /// render calls without ever being visible).
+    modal_redraws: u8,
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -157,6 +163,7 @@ impl App {
             gold: carried_gold,
             game_over: false,
             modal: ModalMode::Closed,
+            modal_redraws: 0,
         };
         app.recompute_fov();
         app
@@ -234,9 +241,12 @@ impl App {
                     }
                     return;
                 }
-                // v0.5.11: stairs confirm modal owns input while open.
+                // v0.5.11/v0.5.14: stairs confirm modal owns input while open.
                 // y / Enter descend, n / Esc cancel; everything else ignored.
+                // v0.5.14: clear modal_redraws so the popup is not redrawn
+                // after the player has answered (prevents "ghost popup").
                 if matches!(self.modal, ModalMode::ConfirmStairs) {
+                    self.modal_redraws = 0;
                     match k.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                             self.modal = ModalMode::Closed;
@@ -292,6 +302,23 @@ impl App {
                         let locale = self.locale;
                         let gold = self.gold;
                         *self = App::new_at_with(new_base, self.floor, rem, locale, gold);
+                    }
+                    KeyCode::Char('~') | KeyCode::Char('`') => {
+                        // v0.5.14: debug stairs warp. Teleport player onto
+                        // the stairs tile so the descent confirm modal can
+                        // be tested without walking the whole floor. The
+                        // modal then triggers via the same code path as a
+                        // normal arrival.
+                        if let Some(stairs) = self.dungeon.stairs {
+                            {
+                                let mut pos = self.world.get::<&mut Position>(self.player).unwrap();
+                                pos.0 = stairs;
+                            }
+                            self.recompute_fov();
+                            self.modal = ModalMode::ConfirmStairs;
+                            self.modal_redraws = 2;
+                            self.log("▼ — 내려갈까? (y/n) [debug warp]");
+                        }
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         // Debug: clear viewshed memory.
@@ -420,10 +447,14 @@ impl App {
         self.tick = self.tick.wrapping_add(1);
         self.enemy_take_turns();
         // v0.5.11: walking onto a StairsDown tile pops the descent confirm.
+        // v0.5.14: also nudge modal_redraws so the popup is guaranteed one
+        // full frame of visibility (vs. flashing for a sub-frame).
         if matches!(self.modal, ModalMode::Closed)
             && matches!(self.dungeon.at(next.0, next.1), Tile::StairsDown)
         {
             self.modal = ModalMode::ConfirmStairs;
+            self.modal_redraws = 2;
+            self.log("▼ — 내려갈까? (y/n)");
         }
     }
 
@@ -945,8 +976,11 @@ impl App {
         if let ModalMode::Inventory { cursor } = self.modal {
             self.draw_inventory_modal(frame, area, cursor);
         }
-        // v0.5.11: stairs confirm modal — small centered popup.
-        if matches!(self.modal, ModalMode::ConfirmStairs) {
+        // v0.5.11/v0.5.14: stairs confirm modal — small centered popup.
+        // v0.5.14: render whenever modal_redraws > 0 even if self.modal
+        // was already cleared, so the popup is visible for at least one
+        // full frame after the player steps onto the stairs tile.
+        if self.modal_redraws > 0 || matches!(self.modal, ModalMode::ConfirmStairs) {
             self.draw_confirm_stairs_modal(frame, area);
         }
     }

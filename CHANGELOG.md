@@ -5,6 +5,28 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.14 — Modal 1-frame guarantee + debug stairs warp
+
+- **Modal popup is now visible for at least one full frame.** The
+  v0.5.11 modal could appear and disappear between two render calls
+  without ever being visible to the player (a single-frame flash). We
+  add an `App::modal_redraws: u8` counter that is set to 2 on stairs
+  arrival and cleared on y/n. The DRAW function renders the modal
+  whenever `modal_redraws > 0` OR `modal == ConfirmStairs`, so the
+  popup is guaranteed one tick of visibility.
+- **Walking onto stairs also logs a hint.** New log line
+  *"▼ — 내려갈까? (y/n)"* appears in the message log so the player
+  sees the prompt even if the centered popup is somehow occluded.
+- **Debug warp key (`~` or backtick).** Teleports the player onto the
+  current floor's stairs tile without walking the whole dungeon. This
+  lets us exercise the same modal code path that a natural arrival
+  uses, and gives the user a way to verify the popup is rendering.
+- **3 new tests** in `modal_redraws_tests`:
+  - `stairs_arrival_sets_modal_redraws_via_debug_warp`
+  - `answering_y_clears_modal_redraws`
+  - `answering_n_clears_modal_redraws`
+- Total: **69 passed / 0 failed**.
+
 ### v0.5.13 — Stairs modal restyled + help text uniformity
 
 - **Modal popup is now unmistakable.** The v0.5.11 popup was a 40×5

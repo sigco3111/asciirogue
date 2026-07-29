@@ -166,6 +166,11 @@ impl App {
         format!("{}F {}", self.floor, FloorTheme::from_depth(self.floor).label())
     }
 
+    /// v0.5.9: probe-side accessor for tests.
+    pub fn gold(&self) -> u32 {
+        self.gold
+    }
+
     fn log(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         if self.messages.len() >= 5 {
@@ -204,10 +209,28 @@ impl App {
                 }
                 // Shift+4 ("$") should also trigger pickup
                 if k.code == KeyCode::Char('4') && k.modifiers.contains(KeyModifiers::SHIFT) {
-                    match pick_up_outcome(&mut self.world, self.player) {
-                        PickupOutcome::Picked => self.log("아이템을 주웠습니다."),
+                    let mut gold_gained: u32 = 0;
+                    match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
+                        PickupOutcome::Picked => {
+                            self.gold = self.gold.saturating_add(gold_gained);
+                            if gold_gained > 0 {
+                                self.log(format!("골드 +{}!", gold_gained));
+                            } else {
+                                self.log("아이템을 주웠습니다.");
+                            }
+                        }
                         PickupOutcome::NoItem => self.log("주울 아이템이 없습니다."),
-                        PickupOutcome::InventoryFull => self.log("인벤토리가 가득 찼습니다."),
+                        PickupOutcome::InventoryFull => {
+                            if gold_gained > 0 {
+                                self.gold = self.gold.saturating_add(gold_gained);
+                                self.log(format!(
+                                    "골드는 +{} 챙겼지만 인벤토리가 가득 찼습니다.",
+                                    gold_gained
+                                ));
+                            } else {
+                                self.log("인벤토리가 가득 찼습니다.");
+                            }
+                        }
                     }
                     return;
                 }
@@ -261,15 +284,29 @@ impl App {
                         }
                     }
                     KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
-                        match pick_up_outcome(&mut self.world, self.player) {
+                        let mut gold_gained: u32 = 0;
+                        match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
                             PickupOutcome::Picked => {
-                                self.log("아이템을 주웠습니다.");
+                                self.gold = self.gold.saturating_add(gold_gained);
+                                if gold_gained > 0 {
+                                    self.log(format!("골드 +{}!", gold_gained));
+                                } else {
+                                    self.log("아이템을 주웠습니다.");
+                                }
                             }
                             PickupOutcome::NoItem => {
                                 self.log("주울 아이템이 없습니다.");
                             }
                             PickupOutcome::InventoryFull => {
-                                self.log("인벤토리가 가득 찼습니다.");
+                                if gold_gained > 0 {
+                                    self.gold = self.gold.saturating_add(gold_gained);
+                                    self.log(format!(
+                                        "골드는 +{} 챙겼지만 인벤토리가 가득 찼습니다.",
+                                        gold_gained
+                                    ));
+                                } else {
+                                    self.log("인벤토리가 가득 찼습니다.");
+                                }
                             }
                         }
                     }
@@ -362,13 +399,29 @@ impl App {
             p.0 = next;
         }
         self.recompute_fov();
-        // Auto-pick up any item on the new tile (e.g., gold `$`).
-        match pick_up_outcome(&mut self.world, self.player) {
+        // Auto-pick up any item on the new tile (e.g., gold `$`). v0.5.9:
+        // gold never enters the inventory — it's folded straight into
+        // `self.gold`. Silent on NoItem (the auto-pickup runs every step).
+        let mut gold_gained: u32 = 0;
+        match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
             PickupOutcome::Picked => {
-                self.log("아이템을 주웠습니다.");
+                if gold_gained > 0 {
+                    self.gold = self.gold.saturating_add(gold_gained);
+                    self.log(format!("골드 +{}!", gold_gained));
+                } else {
+                    self.log("아이템을 주웠습니다.");
+                }
             }
             PickupOutcome::InventoryFull => {
-                self.log("인벤토리가 가득 찼습니다.");
+                if gold_gained > 0 {
+                    self.gold = self.gold.saturating_add(gold_gained);
+                    self.log(format!(
+                        "골드는 +{} 챙겼지만 인벤토리가 가득 찼습니다.",
+                        gold_gained
+                    ));
+                } else {
+                    self.log("인벤토리가 가득 찼습니다.");
+                }
             }
             PickupOutcome::NoItem => {}
         }
@@ -1505,27 +1558,76 @@ mod tests {
 
     #[test]
     fn test_dollar_key_pickup() {
-        // Create a minimal App with a player on a tile that has a gold item ($)
+        // v0.5.9: gold does NOT enter the inventory any more — it's
+        // converted straight to App::gold at pickup time.
         let mut app = App::new(0);
-        // Place a gold item at player's position
         let player_pos = app.world.get::<&Position>(app.player).unwrap().0;
         let gold_item = Item::gold(1);
         app.world.spawn((Position(player_pos), gold_item));
-        // Ensure inventory is empty
+        // Empty inventory so we can assert it stays empty.
         {
             let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
             inv.slots.iter_mut().for_each(|s| *s = None);
         }
-        // Simulate pressing '$' key
-        let ev = Event::Key(KeyEvent { code: KeyCode::Char('$'), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE });
+        let starting_gold = app.gold();
+        // Simulate pressing '$' key.
+        let ev = Event::Key(KeyEvent {
+            code: KeyCode::Char('$'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
         app.handle(&ev);
-        // After handling, a log entry should indicate item was picked up
-        assert!(app.messages.iter().any(|m| m.contains("주웠")));
+        // Gold must have moved to App::gold, not into a slot.
+        assert_eq!(
+            app.gold(),
+            starting_gold + 1,
+            "gold must increment App::gold (was {}, now {})",
+            starting_gold,
+            app.gold()
+        );
+        let inv = app.world.get::<&Inventory>(app.player).unwrap();
+        assert!(
+            inv.slots.iter().all(|s| s.is_none()),
+            "inventory must stay empty — gold skips it (v0.5.9)"
+        );
+        // And the player-facing message must say 골드 +1.
+        assert!(
+            app.messages.iter().any(|m| m.contains("골드")),
+            "messages should mention gold: {:?}",
+            app.messages
+        );
+    }
+
+    /// v0.5.9: picking up a potion (non-gold item) still works the old way —
+    /// it goes into the inventory slot. Only coins are routed around it.
+    #[test]
+    fn test_potion_pickup_still_uses_inventory() {
+        let mut app = App::new(0);
+        let player_pos = app.world.get::<&Position>(app.player).unwrap().0;
+        app.world.spawn((Position(player_pos), Item::potion_hp()));
+        let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+        inv.slots.iter_mut().for_each(|s| *s = None);
+        drop(inv);
+        let g = Event::Key(KeyEvent {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        app.handle(&g);
+        let inv = app.world.get::<&Inventory>(app.player).unwrap();
+        let filled = inv.slots.iter().filter(|s| s.is_some()).count();
+        assert_eq!(filled, 1, "non-gold items still occupy a slot");
+        assert_eq!(inv.slots[0].as_ref().unwrap().glyph, '!');
     }
 
     /// v0.5.6 regression: pressing `g` must pick up gold on an adjacent tile,
     /// not just under the player. Reproduces the bug-report scenario where the
     /// player pressed `g` next to a $ and got "주울 아이템이 없습니다" forever.
+    ///
+    /// v0.5.9 update: gold no longer enters the inventory — verify the gold
+    /// went to `App::gold` and the inventory stayed empty.
     #[test]
     fn test_adjacent_pickup() {
         let mut app = App::new(0);
@@ -1534,6 +1636,7 @@ mod tests {
         app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(10, 10);
         // Empty the inventory.
         app.world.get::<&mut Inventory>(app.player).unwrap().slots.iter_mut().for_each(|s| *s = None);
+        let starting_gold = app.gold();
         // Drop gold to the LEFT of the player.
         app.world.spawn((Position(TilePos(9, 10)), Item::gold(3)));
         // Press 'g'.
@@ -1544,15 +1647,23 @@ mod tests {
             state: crossterm::event::KeyEventState::NONE,
         });
         app.handle(&ev);
-        // After v0.5.6 the gold MUST be in the inventory.
+        // v0.5.9: gold must have moved to App::gold, not into a slot.
+        assert_eq!(
+            app.gold(),
+            starting_gold + 3,
+            "adjacent gold must increment App::gold by 3 (was {}, now {})",
+            starting_gold,
+            app.gold()
+        );
         let inv = app.world.get::<&Inventory>(app.player).unwrap();
-        let filled: Vec<&Item> = inv.slots.iter().filter_map(|s| s.as_ref()).collect();
-        assert_eq!(filled.len(), 1, "adjacent gold must end up in inventory");
-        assert_eq!(filled[0].glyph, '$');
-        // And the player-facing message must say "주웠" (picked up).
         assert!(
-            app.messages.iter().any(|m| m.contains("주웠")),
-            "messages should report the pickup: {:?}",
+            inv.slots.iter().all(|s| s.is_none()),
+            "inventory must stay empty — gold skips it (v0.5.9)"
+        );
+        // And the player-facing message must mention 골드.
+        assert!(
+            app.messages.iter().any(|m| m.contains("골드")),
+            "messages should mention gold: {:?}",
             app.messages
         );
     }

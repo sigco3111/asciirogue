@@ -1,45 +1,47 @@
-//! v0.5.6: Verify pickup now covers the player's tile AND its 4 neighbours.
+//! v0.5.9 pickup probe — verify gold converts to App::gold instead of
+//! occupying an inventory slot, while non-gold items still work normally.
 //!
 //!   cargo run --example pickup_probe -p asciirogue
 
 use asciirogue::{nearest_pickup_info, pick_up_outcome, App, PickupOutcome};
-use asciirogue_core::{Inventory, Item, Player, Position, Renderable, TilePos};
+use asciirogue_core::{Inventory, Item, Player, Position, TilePos};
 
 fn main() {
     let seed: u64 = 7581304714302077700;
+
+    // ── Scenario A: gold on the player's tile ──
     let mut app = App::new(seed);
-
     let player = find_player(&app);
-
-    // ── Scenario A: gold on the player's tile → g should pick it up. ──
     {
         let world = app.world_mut();
         world.get::<&mut Position>(player).unwrap().0 = TilePos(13, 20);
         world.get::<&mut Inventory>(player).unwrap().slots.iter_mut().for_each(|s| *s = None);
         world.spawn((
             Position(TilePos(13, 20)),
-            Renderable::new('$', 0xFF_D2_46),
+            asciirogue_core::Renderable::new('$', 0xFF_D2_46),
             Item::gold(7),
         ));
     }
-    let player = find_player(&app); // re-resolve after any realloc
-    let outcome = pick_up_outcome(app.world_mut(), player);
-    let msgs = app.messages().to_vec();
+    let player = find_player(&app);
+    let starting_gold = app.gold();
+    let mut gold_gained: u32 = 0;
+    let outcome = pick_up_outcome(app.world_mut(), player, &mut gold_gained);
+    // Probe stands in for App::handle — fold the gold back into the wallet.
+    let new_gold = starting_gold + gold_gained;
     eprintln!(
-        "[A] gold on player tile → outcome={:?} msgs={:?}",
-        outcome, msgs
+        "[A] gold on player tile → outcome={:?} gold_gained={} msgs={:?}",
+        outcome, gold_gained, app.messages()
     );
-    let count_a = inv_count(&app, player);
-    eprintln!("    inventory items after pick = {}", count_a);
-    assert_eq!(
-        outcome,
-        PickupOutcome::Picked,
-        "gold ON player tile must be picked up"
+    let inv_count_a = inv_count(&app, player);
+    eprintln!(
+        "    App::gold (simulated): {} → {}, inventory items: {}",
+        starting_gold, new_gold, inv_count_a
     );
-    assert_eq!(count_a, 1, "gold must be in inventory after pick");
+    assert_eq!(outcome, PickupOutcome::Picked, "gold must be picked");
+    assert_eq!(gold_gained, 7, "gold_gained must reflect pickup");
+    assert_eq!(inv_count_a, 0, "inventory must stay empty (v0.5.9)");
 
-    // ── Scenario B: gold one tile to the LEFT → g should also pick it up
-    //    (the bug we just fixed). ──
+    // ── Scenario B: gold one tile to the LEFT ──
     let mut app = App::new(seed);
     let player = find_player(&mut app);
     {
@@ -48,23 +50,21 @@ fn main() {
         world.get::<&mut Inventory>(player).unwrap().slots.iter_mut().for_each(|s| *s = None);
         world.spawn((
             Position(TilePos(12, 20)),
-            Renderable::new('$', 0xFF_D2_46),
+            asciirogue_core::Renderable::new('$', 0xFF_D2_46),
             Item::gold(7),
         ));
     }
     let player = find_player(&mut app);
     let info = nearest_pickup_info(app.dungeon_ref(), app.world_ref(), player);
     eprintln!("[B] gold at (12,20), player at (13,20) → nearest_pickup_info = {:?}", info);
-    let outcome = pick_up_outcome(app.world_mut(), player);
-    eprintln!("    pick_up_outcome = {:?}", outcome);
-    let count_b = inv_count(&app, player);
-    eprintln!("    inventory items after pick = {}", count_b);
-    assert_eq!(
-        outcome,
-        PickupOutcome::Picked,
-        "gold one tile to the LEFT must be picked up after v0.5.6"
-    );
-    assert_eq!(count_b, 1, "gold must be in inventory after pick");
+    let mut gold_gained: u32 = 0;
+    let outcome = pick_up_outcome(app.world_mut(), player, &mut gold_gained);
+    eprintln!("    pick_up_outcome = {:?}, gold_gained = {}", outcome, gold_gained);
+    let inv_count_b = inv_count(&app, player);
+    eprintln!("    App::gold = {}, inventory items = {}", app.gold(), inv_count_b);
+    assert_eq!(outcome, PickupOutcome::Picked, "adjacent gold must be picked");
+    assert_eq!(gold_gained, 7);
+    assert_eq!(inv_count_b, 0, "inventory stays empty for gold");
 
     // ── Scenario C: gold 2 tiles away → g should say NoItem. ──
     let mut app = App::new(seed);
@@ -75,20 +75,51 @@ fn main() {
         world.get::<&mut Inventory>(player).unwrap().slots.iter_mut().for_each(|s| *s = None);
         world.spawn((
             Position(TilePos(11, 20)),
-            Renderable::new('$', 0xFF_D2_46),
+            asciirogue_core::Renderable::new('$', 0xFF_D2_46),
             Item::gold(7),
         ));
     }
     let player = find_player(&mut app);
-    let outcome = pick_up_outcome(app.world_mut(), player);
-    eprintln!("[C] gold 2 tiles left → outcome={:?}", outcome);
-    assert_eq!(
-        outcome,
-        PickupOutcome::NoItem,
-        "gold 2 tiles away must NOT be picked up"
-    );
+    let mut gold_gained: u32 = 0;
+    let outcome = pick_up_outcome(app.world_mut(), player, &mut gold_gained);
+    eprintln!("[C] gold 2 tiles left → outcome={:?} gold_gained={}", outcome, gold_gained);
+    assert_eq!(outcome, PickupOutcome::NoItem);
+    assert_eq!(gold_gained, 0);
 
-    eprintln!("\n=== all assertions passed ===");
+    // ── Scenario D: gold + potion in same pickup radius — gold → wallet,
+    // potion → slot 0. ──
+    let mut app = App::new(seed);
+    let player = find_player(&mut app);
+    {
+        let world = app.world_mut();
+        world.get::<&mut Position>(player).unwrap().0 = TilePos(50, 50);
+        world.get::<&mut Inventory>(player).unwrap().slots.iter_mut().for_each(|s| *s = None);
+        world.spawn((
+            Position(TilePos(50, 50)),
+            asciirogue_core::Renderable::new('$', 0xFF_D2_46),
+            Item::gold(3),
+        ));
+        world.spawn((
+            Position(TilePos(51, 50)),
+            asciirogue_core::Renderable::new('!', 0x5A_DC_A0),
+            Item::potion_hp(),
+        ));
+    }
+    let player = find_player(&mut app);
+    let mut gold_gained: u32 = 0;
+    let outcome = pick_up_outcome(app.world_mut(), player, &mut gold_gained);
+    eprintln!("[D] gold+potion mix → outcome={:?} gold_gained={}", outcome, gold_gained);
+    assert_eq!(outcome, PickupOutcome::Picked);
+    assert_eq!(gold_gained, 3, "gold should still be picked up alongside the potion");
+    let inv_count_d = inv_count(&app, player);
+    eprintln!(
+        "    App::gold = {}, inventory items = {} (potion should occupy slot 0)",
+        app.gold(),
+        inv_count_d
+    );
+    assert_eq!(inv_count_d, 1, "potion still occupies one slot");
+
+    eprintln!("\n=== all v0.5.9 pickup assertions passed ===");
 }
 
 fn find_player(app: &App) -> hecs::Entity {

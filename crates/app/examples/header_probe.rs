@@ -25,7 +25,10 @@ fn main() {
     }
     print_header(&app, "before pickup (player at (13,20), gold at (12,20))");
     let player = find_player(&app);
-    let outcome = pick_up_outcome(app.world_mut(), player);
+    let outcome = {
+        let mut gold_gained: u32 = 0;
+        pick_up_outcome(app.world_mut(), player, &mut gold_gained)
+    };
     eprintln!("  >> pick_up_outcome = {:?}\n", outcome);
     assert_eq!(outcome, PickupOutcome::Picked, "adjacent gold must be picked up after v0.5.6");
     print_header(&app, "after pickup (gold consumed)");
@@ -45,7 +48,10 @@ fn main() {
     }
     print_header(&mut app, "scenario B: gold 2 tiles left");
     let player = find_player(&mut app);
-    let outcome = pick_up_outcome(app.world_mut(), player);
+    let outcome = {
+        let mut gold_gained: u32 = 0;
+        pick_up_outcome(app.world_mut(), player, &mut gold_gained)
+    };
     eprintln!("  >> pick_up_outcome = {:?}", outcome);
     assert_eq!(outcome, PickupOutcome::NoItem, "out-of-range gold must NOT be picked up");
 }

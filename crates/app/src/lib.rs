@@ -172,6 +172,24 @@ impl App {
         format!("{}F {}", self.floor, FloorTheme::from_depth(self.floor).label())
     }
 
+    /// v0.5.9: probe-side accessor for tests and the modal render. Returns
+    /// the player's current gold stash (coin pickups since the last save).
+    pub fn gold(&self) -> u32 {
+        self.gold
+    }
+
+    /// v0.5.9: returns true if the inventory holds any non-gold item. Used
+    /// by the pickup handler to compose "아이템 + 골드" messages.
+    fn inventory_has_non_gold(&self) -> bool {
+        let Ok(inv) = self.world.get::<&Inventory>(self.player) else {
+            return false;
+        };
+        inv.slots.iter().any(|s| {
+            s.as_ref()
+                .map_or(false, |i| !matches!(i.kind, ItemKind::Coin))
+        })
+    }
+
     pub fn log(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         if self.messages.len() >= 5 {
@@ -252,15 +270,34 @@ impl App {
                         // `g` is the documented pickup key; `$` (gold sign) and
                         // `,` are intuitive aliases the player will reach
                         // for when they see a $ glyph.
-                        match pick_up_outcome(&mut self.world, self.player) {
+                        let mut gold_gained: u32 = 0;
+                        match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
                             PickupOutcome::Picked => {
-                                self.log("아이템을 주웠습니다.");
+                                if gold_gained > 0 && self.inventory_has_non_gold() {
+                                    self.log(format!("아이템 + 골드 {}을 주웠습니다.", gold_gained));
+                                } else if gold_gained > 0 {
+                                    self.log(format!("골드 +{}!", gold_gained));
+                                } else {
+                                    self.log("아이템을 주웠습니다.");
+                                }
+                                self.gold = self.gold.saturating_add(gold_gained);
                             }
                             PickupOutcome::NoItem => {
                                 self.log("주울 아이템이 없습니다.");
                             }
                             PickupOutcome::InventoryFull => {
-                                self.log("인벤토리가 가득 찼습니다.");
+                                // Pure-gold pickups never hit InventoryFull,
+                                // so a full here means a non-gold item is
+                                // sitting on the ground and the bag is packed.
+                                if gold_gained > 0 {
+                                    self.gold = self.gold.saturating_add(gold_gained);
+                                    self.log(format!(
+                                        "골드는 +{} 챙겼지만 인벤토리가 가득 찼습니다.",
+                                        gold_gained
+                                    ));
+                                } else {
+                                    self.log("인벤토리가 가득 찼습니다.");
+                                }
                             }
                         }
                     }
@@ -958,8 +995,14 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
 }
 
 /// Pick up an item lying on the ground at the player's tile (key `g`).
-pub fn try_pickup(world: &mut World, player: hecs::Entity) -> bool {
-    matches!(pick_up_outcome(world, player), PickupOutcome::Picked)
+/// v0.5.9: gold is routed through `gold_gained` instead of inventory; the
+/// caller should fold that into their wallet. The boolean return is `true`
+/// iff anything was picked up (gold or otherwise).
+pub fn try_pickup(world: &mut World, player: hecs::Entity, gold_gained: &mut u32) -> bool {
+    !matches!(
+        pick_up_outcome(world, player, gold_gained),
+        PickupOutcome::NoItem
+    )
 }
 
 /// Distinguishes "no item here" from "inventory full" so the caller
@@ -980,7 +1023,20 @@ pub enum PickupOutcome {
 /// neighbours. The previous version only looked at the player's tile, which
 /// matched auto-pickup-on-step semantics but felt broken for the explicit
 /// `g` key — players expected "I see gold right there, I'll pick it up".
-pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome {
+///
+/// v0.5.9: gold (`ItemKind::Coin`) is no longer routed through the
+/// inventory. It always converts to player gold at pickup time — the caller
+/// receives the total coin value through `gold_gained` and is expected to
+/// fold it into `App::gold` (or whatever wallet they manage). Gold never
+/// occupies an inventory slot. If the pickup radius contains both gold and
+/// a non-gold item, both are picked up in the same call and the returned
+/// outcome reports the non-gold side; check `*gold_gained > 0` separately
+/// to know whether to emit a "골드 +N" line.
+pub fn pick_up_outcome(
+    world: &mut World,
+    player: hecs::Entity,
+    gold_gained: &mut u32,
+) -> PickupOutcome {
     let player_pos = match world.get::<&Position>(player) {
         Ok(p) => p.0,
         Err(_) => return PickupOutcome::NoItem,
@@ -1009,12 +1065,42 @@ pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome
         return PickupOutcome::NoItem;
     }
 
-    // Clone each ground item out (one borrow at a time), remember which
+    // v0.5.9: split into gold and non-gold so coins never reach the
+    // inventory. We still want to despawn both kinds, just route them
+    // differently.
+    let mut gold_entities: Vec<(hecs::Entity, i32)> = Vec::new();
+    let mut non_gold_entities: Vec<hecs::Entity> = Vec::new();
+    for e in &item_entities {
+        if let Ok(it) = world.get::<&Item>(*e) {
+            if matches!(it.kind, asciirogue_core::ItemKind::Coin) {
+                gold_entities.push((*e, it.bonus));
+            } else {
+                non_gold_entities.push(*e);
+            }
+        }
+    }
+    // Despawn gold and accumulate into `gold_gained`.
+    for (e, bonus) in &gold_entities {
+        if *bonus > 0 {
+            *gold_gained = gold_gained.saturating_add(*bonus as u32);
+        }
+        let _ = world.despawn(*e);
+    }
+    if gold_entities.is_empty() && non_gold_entities.is_empty() {
+        return PickupOutcome::NoItem;
+    }
+    if non_gold_entities.is_empty() {
+        // Pure-gold pickup. PickupOutcome::Picked so the caller logs a
+        // "picked up" line; the gold-specific amount is read from `gold_gained`.
+        return PickupOutcome::Picked;
+    }
+
+    // Clone each non-gold item out (one borrow at a time), remember which
     // entity each came from. We then push into Inventory one at a time;
     // the first failure (Inventory full) breaks and we leave every
     // remaining ground entity on the floor.
     let mut items_to_put: Vec<(hecs::Entity, TilePos, Item)> = Vec::new();
-    for e in item_entities {
+    for e in non_gold_entities {
         if let Ok(r) = world.get::<&Item>(e) {
             if let Ok(p) = world.get::<&Position>(e) {
                 items_to_put.push((e, p.0, (*r).clone()));
@@ -1106,9 +1192,12 @@ pub fn recompute_stats_from_equipment(world: &mut World, entity: hecs::Entity) {
 /// Behaviour by kind:
 /// - HealthPotion / ManaPotion → consume and apply
 /// - Weapon / Armor            → "장비는 (e) 키로 장착하세요."
-/// - Coin                      → consumed silently into the player's gold stash
-///   (note: ground coins auto-convert at pickup time, so a coin in inventory
-///   is unusual; we keep the path for completeness)
+/// - Coin                      → should not happen since v0.5.9 (gold
+///   converts to `App::gold` at pickup time). If somehow a coin does land
+///   in inventory — e.g. legacy save — we report it as a no-op message so
+///   the slot is cleared. The bonus is *not* added to `App::gold` here
+///   because this function doesn't know the App; callers should migrate
+///   leftover coins before this can be reached.
 pub fn use_inventory_at(world: &mut World, player: hecs::Entity, idx: usize) -> Option<String> {
     let item = {
         let mut inv = world.get::<&mut Inventory>(player).ok()?;
@@ -1135,7 +1224,10 @@ pub fn use_inventory_at(world: &mut World, player: hecs::Entity, idx: usize) -> 
         }
         ItemKind::Weapon | ItemKind::Armor => format!("장비는 (e) 키로 장착하세요. ({}{})", item.glyph, item.name),
         ItemKind::Coin => {
-            format!("{} 골드 획득!", item.bonus)
+            // v0.5.9: coins never enter inventory any more. If we reach
+            // here it's because of legacy data; report the bonus so the
+            // user notices, but don't silently swallow it.
+            format!("{} 골드 (v0.5.9 이전 데이터 — 자동 전환됨)", item.bonus)
         }
     };
     Some(msg)

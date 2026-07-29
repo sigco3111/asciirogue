@@ -5,6 +5,46 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.19 — Stairs trigger survives a loot on the stairs tile
+
+User walkthrough exposed the real bug. When the player walked onto the
+stairs tile, a ground item (loot) was frequently spawned there by
+v0.5.x's loot logic. The stairs trigger code at the bottom of
+try_player_act was unreachable because entity_at(next) returned the
+loot entity, and player_attack returned early on `already_dead` (loot
+has no Health component) before the function ever reached the modal
+trigger.
+
+Flow that was broken:
+1. Player at (54, 20), stairs at (55, 20), loot at (55, 20)
+2. `l` pressed → next = (55, 20)
+3. entity_at((55, 20)) = Some(loot_entity)
+4. player_attack(loot_entity): already_dead = true (no Health) → return
+5. try_player_act returns; modal trigger never runs
+
+v0.5.19 fix: filter entity_at to only enemies (entities with Health).
+Ground items (no Health) fall through to the walking + pickup path,
+which then executes the modal trigger at the bottom.
+
+```rust
+let target_entity = self.entity_at(next).filter(|&e| {
+    self.world.get::<&Health>(e).is_ok()
+});
+```
+
+After fix:
+1. same setup
+2. l pressed → next = (55, 20)
+3. entity_at = Some(loot_entity), filter rejects (no Health)
+4. Walking path: pick up loot, then modal trigger fires
+5. Modal opens, player can confirm y/n
+
+Added 2 tests in `loot_on_stairs_tests`:
+- `stairs_trigger_fires_with_loot_on_stairs`
+- `stairs_trigger_fires_without_loot`
+
+Total: **80 passed / 0 failed**.
+
 ### v0.5.18 — Drop v0.5.16 recovery UX (infinite-modal trap)
 
 User feedback: "▼에 접근해도 모달은 호출되지 않음. (이전과 같은 생태)"

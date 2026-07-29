@@ -420,8 +420,13 @@ impl App {
         }
         let next = TilePos(cur.0 + dx, cur.1 + dy);
 
-        // Enemy in next tile? Try to attack.
-        let target_entity = self.entity_at(next);
+        // v0.5.19: Filter to enemies only (those with Health). Ground
+        // items (loot) have no Health component; if we let them through
+        // player_attack returns early on `already_dead` and the stairs
+        // modal trigger at the bottom of this function never runs.
+        let target_entity = self.entity_at(next).filter(|&e| {
+            self.world.get::<&Health>(e).is_ok()
+        });
         if let Some(entity) = target_entity {
             self.player_attack(entity);
             self.tick = self.tick.wrapping_add(1);

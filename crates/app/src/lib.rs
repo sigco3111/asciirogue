@@ -408,8 +408,13 @@ impl App {
         }
         let next = TilePos(cur.0 + dx, cur.1 + dy);
 
-        // Enemy in next tile? Try to attack.
-        let target_entity = self.entity_at(next);
+        // v0.5.19: Filter to enemies only (those with Health). Ground
+        // items (loot) have no Health component; if we let them through
+        // player_attack returns early on `already_dead` and the stairs
+        // modal trigger at the bottom of this function never runs.
+        let target_entity = self.entity_at(next).filter(|&e| {
+            self.world.get::<&Health>(e).is_ok()
+        });
         if let Some(entity) = target_entity {
             self.player_attack(entity);
             self.tick = self.tick.wrapping_add(1);
@@ -2624,5 +2629,78 @@ mod v0_5_18_no_recovery_tests {
         app.handle(&char_event('h'));
         assert_eq!(before_modal, app.modal,
             "modal state should not change after n and a non-modal key");
+    }
+}
+
+#[cfg(test)]
+mod loot_on_stairs_tests {
+    use super::*;
+    use asciirogue_core::Item;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn char_event(c: char) -> Event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    /// v0.5.19: stairs trigger must fire even when a ground item (loot)
+    /// is sitting on the stairs tile. Previously, entity_at would return
+    /// the loot entity, player_attack would return early on `already_dead`,
+    /// and the modal trigger code at the bottom of try_player_act never
+    /// ran.
+    #[test]
+    fn stairs_trigger_fires_with_loot_on_stairs() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let last = app.dungeon.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        // Spawn a ground item on the stairs tile.
+        app.world.spawn((
+            Position(TilePos(sx, sy)),
+            Renderable::new('$', 0xFF_D2_46),
+            Item {
+                kind: ItemKind::Coin,
+                name: "금화".into(),
+                glyph: '$',
+                fg_rgb: 0xFF_D2_46,
+                bonus: 1,
+            },
+        ));
+        // Place player one tile to the LEFT of the stairs so a single
+        // `l` press moves them onto the stairs.
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        // Sanity: stairs is at (sx, sy).
+        assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
+        // Single 'l' press should walk onto the stairs and trigger modal.
+        app.handle(&char_event('l'));
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs),
+            "v0.5.19: stairs modal must fire even when loot occupies the stairs tile"
+        );
+        assert!(app.at_stairs);
+    }
+
+    /// v0.5.19: without the loot, the stairs trigger still works.
+    #[test]
+    fn stairs_trigger_fires_without_loot() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let last = app.dungeon.rooms.last().unwrap();
+        let (sx, sy) = last.center();
+        // Place player one tile to the LEFT of the stairs.
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        // Sanity.
+        assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
+        app.handle(&char_event('l'));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
+            "stairs modal must fire even when no loot is on the stairs");
     }
 }

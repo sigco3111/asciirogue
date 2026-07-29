@@ -1268,6 +1268,40 @@ mod tests {
         assert!(app.messages.iter().any(|m| m.contains("주웠")));
     }
 
+    /// v0.5.6 regression: pressing `g` must pick up gold on an adjacent tile,
+    /// not just under the player. Reproduces the bug-report scenario where the
+    /// player pressed `g` next to a $ and got "주울 아이템이 없습니다" forever.
+    #[test]
+    fn test_adjacent_pickup() {
+        let mut app = App::new(0);
+        // Teleport player to (10, 10) so we don't collide with auto-populated
+        // loot in the first room.
+        app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(10, 10);
+        // Empty the inventory.
+        app.world.get::<&mut Inventory>(app.player).unwrap().slots.iter_mut().for_each(|s| *s = None);
+        // Drop gold to the LEFT of the player.
+        app.world.spawn((Position(TilePos(9, 10)), Item::gold(3)));
+        // Press 'g'.
+        let ev = Event::Key(KeyEvent {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        app.handle(&ev);
+        // After v0.5.6 the gold MUST be in the inventory.
+        let inv = app.world.get::<&Inventory>(app.player).unwrap();
+        let filled: Vec<&Item> = inv.slots.iter().filter_map(|s| s.as_ref()).collect();
+        assert_eq!(filled.len(), 1, "adjacent gold must end up in inventory");
+        assert_eq!(filled[0].glyph, '$');
+        // And the player-facing message must say "주웠" (picked up).
+        assert!(
+            app.messages.iter().any(|m| m.contains("주웠")),
+            "messages should report the pickup: {:?}",
+            app.messages
+        );
+    }
+
     fn vim_keys_map_to_directions() {
         assert_eq!(key_to_direction(&KeyCode::Char('h')), Some(Direction::Left));
         assert_eq!(key_to_direction(&KeyCode::Char('j')), Some(Direction::Down));

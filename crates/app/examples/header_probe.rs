@@ -3,7 +3,7 @@
 //!
 //!   cargo run --example header_probe -p asciirogue
 
-use asciirogue::{nearest_pickup_info, App};
+use asciirogue::{nearest_pickup_info, pick_up_outcome, App, PickupOutcome};
 use asciirogue_core::{Direction, Health, Mana, Player, Position};
 
 fn main() {
@@ -23,13 +23,31 @@ fn main() {
             asciirogue_core::Item::gold(7),
         ));
     }
-    print_header(&app, "scenario A (player at (13,20), gold at (12,20))");
+    print_header(&app, "before pickup (player at (13,20), gold at (12,20))");
+    let player = find_player(&app);
+    let outcome = pick_up_outcome(app.world_mut(), player);
+    eprintln!("  >> pick_up_outcome = {:?}\n", outcome);
+    assert_eq!(outcome, PickupOutcome::Picked, "adjacent gold must be picked up after v0.5.6");
+    print_header(&app, "after pickup (gold consumed)");
 
-    // Move the player one tile toward the gold: y=20 → y=19.
-    // (Try Up, then re-query.)
-    app.step(Direction::Up);
-    print_header(&app, "after step Up (player at (13,19))");
-    // gold now adjacent → BOLD
+    // Same scenario again, but this time gold is 2 tiles away → NoItem.
+    let mut app = App::new(seed);
+    let player = find_player(&mut app);
+    {
+        let world = app.world_mut();
+        world.get::<&mut Position>(player).unwrap().0 = asciirogue_core::TilePos(13, 20);
+        world.get::<&mut asciirogue_core::Inventory>(player).unwrap().slots.iter_mut().for_each(|s| *s = None);
+        world.spawn((
+            asciirogue_core::Position(asciirogue_core::TilePos(11, 20)),
+            asciirogue_core::Renderable::new('$', 0xFF_D2_46),
+            asciirogue_core::Item::gold(7),
+        ));
+    }
+    print_header(&mut app, "scenario B: gold 2 tiles left");
+    let player = find_player(&mut app);
+    let outcome = pick_up_outcome(app.world_mut(), player);
+    eprintln!("  >> pick_up_outcome = {:?}", outcome);
+    assert_eq!(outcome, PickupOutcome::NoItem, "out-of-range gold must NOT be picked up");
 }
 
 fn print_header(app: &App, label: &str) {

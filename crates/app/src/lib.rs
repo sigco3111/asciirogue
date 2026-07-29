@@ -947,16 +947,35 @@ pub enum PickupOutcome {
 }
 
 /// Tri-state pickup. Caller should display a distinct message per arm.
+///
+/// v0.5.6: pickup now covers the player's tile **and** its 4 cardinal
+/// neighbours. The previous version only looked at the player's tile, which
+/// matched auto-pickup-on-step semantics but felt broken for the explicit
+/// `g` key — players expected "I see gold right there, I'll pick it up".
 pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome {
     let player_pos = match world.get::<&Position>(player) {
         Ok(p) => p.0,
         Err(_) => return PickupOutcome::NoItem,
     };
-    // Items at the player's tile (in entity-id order so it's stable).
+    // v0.5.6: collect ground items on the player's tile and the 4 cardinal
+    // neighbours. The player's own tile is tried first so auto-pickup
+    // behaviour (which fires when the player steps onto an item) remains
+    // deterministic — if both "here" and "next to me" have items, the one
+    // we're standing on is the one that gets grabbed first.
+    let here = player_pos;
+    let neighbours = [
+        TilePos(player_pos.0 - 1, player_pos.1),
+        TilePos(player_pos.0 + 1, player_pos.1),
+        TilePos(player_pos.0, player_pos.1 - 1),
+        TilePos(player_pos.0, player_pos.1 + 1),
+    ];
+    let wanted: std::collections::HashSet<TilePos> =
+        std::iter::once(here).chain(neighbours.iter().copied()).collect();
+    // Items in entity-id order so it's stable across runs.
     let item_entities: Vec<hecs::Entity> = world
         .query::<(&Position, &Item)>()
         .iter()
-        .filter_map(|(e, (p, _))| if p.0 == player_pos { Some(e) } else { None })
+        .filter_map(|(e, (p, _))| if wanted.contains(&p.0) { Some(e) } else { None })
         .collect();
     if item_entities.is_empty() {
         return PickupOutcome::NoItem;
@@ -966,10 +985,12 @@ pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome
     // entity each came from. We then push into Inventory one at a time;
     // the first failure (Inventory full) breaks and we leave every
     // remaining ground entity on the floor.
-    let mut items_to_put: Vec<(hecs::Entity, Item)> = Vec::new();
+    let mut items_to_put: Vec<(hecs::Entity, TilePos, Item)> = Vec::new();
     for e in item_entities {
         if let Ok(r) = world.get::<&Item>(e) {
-            items_to_put.push((e, (*r).clone()));
+            if let Ok(p) = world.get::<&Position>(e) {
+                items_to_put.push((e, p.0, (*r).clone()));
+            }
         }
     }
     drop(world.get::<&Health>(player)); // release any lingering refs
@@ -978,7 +999,7 @@ pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome
     // got in (Picked) or none did (InventoryFull).
     let mut inserted = 0usize;
     let mut inventory_full = false;
-    for (e, item) in items_to_put.drain(..) {
+    for (e, _pos, item) in items_to_put.drain(..) {
         match inv.push(item) {
             Ok(_) => inserted += 1,
             Err(()) => {
@@ -992,16 +1013,15 @@ pub fn pick_up_outcome(world: &mut World, player: hecs::Entity) -> PickupOutcome
         }
     }
     drop(inv);
-    // Now despawn the ground entities we successfully inserted.
-    // We tracked them as the *prefix* of `items_to_put` of length
-    // `inserted`, but since we drained the vec while pushing we no longer
-    // have them around in order. Rebuild the despawn list by recursing
-    // the ground items again.
+    // Now despawn the ground entities we successfully inserted. Use the
+    // exact `inserted` ground-item entities from the original ordering by
+    // re-querying the same set of tiles — this preserves "item the player
+    // is standing on is consumed first, neighbours after".
     if inserted > 0 {
         let to_despawn: Vec<hecs::Entity> = world
             .query::<(&Position, &Item)>()
             .iter()
-            .filter_map(|(e, (p, _))| if p.0 == player_pos { Some(e) } else { None })
+            .filter_map(|(e, (p, _))| if wanted.contains(&p.0) { Some(e) } else { None })
             .take(inserted)
             .collect();
         for e in to_despawn {

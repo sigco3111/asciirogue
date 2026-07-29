@@ -223,6 +223,10 @@ pub struct Ai {
     /// Last known player position. Updated when the enemy "sees" the player.
     /// `None` while patrol / unaware.
     pub last_known_player: Option<TilePos>,
+    /// Action cooldown (in player-turns). > 0 means this enemy waits this
+    /// turn before it can act again. Reset to 0 each player action so only
+    /// one hit per enemy per turn.
+    pub cooldown: u8,
 }
 
 impl Ai {
@@ -232,6 +236,7 @@ impl Ai {
             speed,
             vision,
             last_known_player: None,
+            cooldown: 0,
         }
     }
 }

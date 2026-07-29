@@ -9,6 +9,10 @@ license.workspace = true
 name = "asciirogue"
 path = "src/main.rs"
 
+[lib]
+name = "asciirogue"
+path = "src/lib.rs"
+
 [dependencies]
 asciirogue-core = { path = "../core" }
 asciirogue-procgen = { path = "../procgen" }

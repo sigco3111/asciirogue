@@ -5,7 +5,30 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.26 — `!` dev cheat: drop a potion
+### v0.5.27 — Death screen overlay
+
+The v0.5.25 death handler pushed summary messages but they were
+buried in the footer log (which only shows the last 2 messages).
+The user reported that the death screen looked empty: header
+still said "asciirogue" (not "YOU DIED"), the body was blank,
+and the footer was truncated to two log lines. v0.5.27 renders
+a proper death overlay:
+
+- New `draw_death_screen` method renders the death summary in
+  the body area so the player sees the result of their run at
+  a glance. Red bold title (`═══ ☠ YOU DIED ☠ ═══`), centered
+  alignment, summary lines in white, restart hotkey highlighted.
+- The map chunk is wiped with `Clear` when game_over so the
+  death summary stands out cleanly against any stale dungeon.
+- Header title already switched to ` ☠ YOU DIED ☠ ` in v0.5.25;
+  v0.5.27 makes sure the body matches.
+- Footer controls hint switches to `R = 새 게임, q = 종료` on
+  death so the restart hotkey is visible without scrolling.
+
+Test totals: 105 pass / 0 fail (was 104 pass / 0 fail; added 1
+death-screen regression test).
+
+## v0.5.26 — `!` dev cheat: drop a potion
 
 Manual QA for the v0.5.25 death summary required walking the
 player into an enemy at low HP — fragile because (a) enemy

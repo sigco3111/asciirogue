@@ -956,7 +956,9 @@ impl App {
             .cloned()
             .collect::<Vec<_>>()
             .join("  |  ");
-        let controls_hint = if self.boss_defeated && self.floor == BOSS_FLOOR {
+        let controls_hint = if self.game_over {
+            "R = 새 게임, q = 종료"
+        } else if self.boss_defeated && self.floor == BOSS_FLOOR {
             "g pick  i potion  > descend  R restart"
         } else {
             "g pick  i potion  q quit  r new  R restart"
@@ -970,6 +972,60 @@ impl App {
         )))
         .block(Block::default().borders(Borders::ALL));
         frame.render_widget(status, chunks[2]);
+
+        // v0.5.27: when the player is dead, the death screen replaces
+        // the dungeon map so the summary (floor reached, gold saved,
+        // restart hotkey) gets prime real estate instead of being
+        // buried in the truncated footer log.
+        if self.game_over {
+            self.draw_death_screen(frame, chunks[1]);
+        }
+    }
+
+    /// v0.5.27: centered death screen overlay. The death summary
+    /// pushed by `on_player_death` is rendered in the body area so
+    /// the player sees the result of their run — not just the
+    /// truncated footer log. Rendered inside the map chunk so the
+    /// header (with YOU DIED title) and footer (with R/q hint) stay
+    /// where they were.
+    pub fn draw_death_screen(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Clear, Paragraph, Wrap};
+
+        // Wipe the map so the death panel stands out cleanly even if
+        // the dungeon would have rendered stale tiles behind it.
+        frame.render_widget(Clear, area);
+
+        let red = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let white = Style::default().fg(Color::White);
+
+        // Render the death summary lines (pushed by on_player_death).
+        // The first line is the title (═══ … ═══), the rest is the summary.
+        // The restart hotkey line is highlighted so it stands out.
+        let summary_lines: Vec<Line> = self
+            .messages
+            .iter()
+            .rev()
+            .take(8)
+            .rev()
+            .enumerate()
+            .map(|(i, m)| {
+                let style = if i == 0 {
+                    red
+                } else if m.contains("R =") {
+                    white.add_modifier(Modifier::BOLD)
+                } else {
+                    white
+                };
+                Line::from(Span::styled(m.as_str(), style))
+            })
+            .collect();
+
+        let para = Paragraph::new(summary_lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(para, area);
     }
 }
 

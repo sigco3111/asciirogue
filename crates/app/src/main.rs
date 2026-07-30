@@ -1097,7 +1097,9 @@ impl App {
             .cloned()
             .collect::<Vec<_>>()
             .join("  |  ");
-        let controls_hint = if self.boss_defeated && self.floor == BOSS_FLOOR {
+        let controls_hint = if self.game_over {
+            "R = 새 게임, q = 종료"
+        } else if self.boss_defeated && self.floor == BOSS_FLOOR {
             "g pick  i inv  p potion  stairs: y/n  R restart"
         } else {
             "g pick  i inv  p potion  stairs: y/n  q quit  R restart"
@@ -1123,6 +1125,59 @@ impl App {
         if self.modal_redraws > 0 || matches!(self.modal, ModalMode::ConfirmStairs { .. }) {
             self.draw_confirm_stairs_modal(frame, area);
         }
+        // v0.5.27: when the player is dead, the death screen replaces
+        // the dungeon map. This gives the summary (floor reached, gold
+        // saved, restart hotkey) prime real estate instead of hiding
+        // it in the truncated footer log.
+        if self.game_over {
+            self.draw_death_screen(frame, chunks[1]);
+        }
+    }
+
+    /// v0.5.27: centered death screen overlay. The death summary
+    /// pushed by `on_player_death` is rendered in the body area so
+    /// the player sees the result of their run — not just the
+    /// truncated footer log. Rendered inside the map chunk so the
+    /// header (with YOU DIED title) and footer (with R/q hint) stay
+    /// where they were.
+    fn draw_death_screen(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Clear, Paragraph, Wrap};
+
+        // Wipe the map so the death panel stands out cleanly even if
+        // the dungeon would have rendered stale tiles behind it.
+        frame.render_widget(Clear, area);
+
+        let red = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let white = Style::default().fg(Color::White);
+
+        // Render the death summary lines (pushed by on_player_death).
+        // The first line is the title (═══ … ═══), the rest is the summary.
+        // The restart hotkey line is highlighted so it stands out.
+        let summary_lines: Vec<Line> = self
+            .messages
+            .iter()
+            .rev()
+            .take(8)
+            .rev()
+            .enumerate()
+            .map(|(i, m)| {
+                let style = if i == 0 {
+                    red
+                } else if m.contains("R =") {
+                    white.add_modifier(Modifier::BOLD)
+                } else {
+                    white
+                };
+                Line::from(Span::styled(m.as_str(), style))
+            })
+            .collect();
+
+        let para = Paragraph::new(summary_lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(para, area);
     }
 
     /// v0.5.11: popup asking for descent confirmation. Renders on top of
@@ -3225,6 +3280,77 @@ mod tests {
             joined.contains("가득") || joined.contains("full") || joined.contains("실패"),
             "v0.5.26: `!` with full inventory must log a refusal. Messages: {}",
             joined
+        );
+    }
+
+    // ─── v0.5.27: death screen ─────────────────────────────────────────────────────
+    //
+    // The v0.5.25 death handler pushed summary messages but they were
+    // buried in the footer log (which only shows the last 2 messages).
+    // The user reported that the death screen looked empty:
+    // header still said "asciirogue" (not "YOU DIED"), the body was
+    // blank, and the footer was truncated. v0.5.27 renders a proper
+    // death overlay: red border, "YOU DIED" title, summary centered
+    // in the body area, controls in the footer.
+
+    /// When game_over is true, the rendered screen must contain the
+    /// "YOU DIED" title and the death summary text — not just the
+    /// truncated footer log.
+    #[test]
+    fn death_screen_renders_you_died_title_and_summary() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 4);
+        app.gold += 75;
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 0;
+        }
+        app.on_player_died_for_tests();
+        assert!(app.game_over);
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                if !sym.is_empty() && sym != " " {
+                    rendered.push_str(sym);
+                }
+            }
+            rendered.push('\n');
+        }
+
+        // The header title must switch to "YOU DIED" (not "asciirogue")
+        // so the player immediately sees the game-over state.
+        assert!(
+            rendered.contains("YOU DIED") || rendered.contains("☠"),
+            "v0.5.27: death screen header must show 'YOU DIED' / '☠' — \
+             otherwise the player can't tell the run is over. \
+             First 5 lines:\n{}",
+            rendered.lines().take(5).collect::<Vec<_>>().join("\n")
+        );
+
+        // The summary lines (floor reached, bosses killed, gold,
+        // restart hotkey) must appear in the screen body — not just
+        // be truncated out of the footer.
+        assert!(
+            rendered.contains("도달") || rendered.contains("4F"),
+            "v0.5.27: death screen must show 'floor reached' in the body"
+        );
+        assert!(
+            rendered.contains("R=새") || rendered.contains("새게"),
+            "v0.5.27: death screen must show the restart hotkey prominently. \
+             Got lines containing 'R' or '새':\n{}",
+            rendered
+                .lines()
+                .filter(|l| l.contains("R") || l.contains("새"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
     #[test]

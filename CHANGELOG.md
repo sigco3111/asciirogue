@@ -3,6 +3,38 @@
 All notable changes to asciirogue are documented here. Versions follow
 [SemVer](https://semver.org/) loosely — pre-1.0 we bump on milestone.
 
+## v0.6.0 — Knob slider system (SPEC §20)
+
+게임 룰 미세 조정을 위한 **16-knob 슬라이더 시스템**을 도입했습니다. SPEC §20 노브 시스템을 게임 중 `k`/`K` 키로 열어 슬라이더로 조정하고, 다음 런에도 자동 저장됩니다.
+
+**Data layer**
+- 신규 `crates/core/src/knobs.rs` (483 LOC): `KnobId` enum (16개 변형), `Knobs` struct (16 f32 슬라이더), step/range/default/label 테이블, `get`/`set`/`set_clamped`/`clamp`/`reset`/`reset_one`/`step_of`/`range_of`/`default_of`/`label_of` 메서드, `KnobId::from_index` 0-기반 인덱스 → ID 변환. 모든 필드는 `#[serde(default = "fn")]`로 표시되어 마이그레이션 안전.
+- `SoulRemembrance` 에 `#[serde(default)] pub knobs: Knobs` 필드 추가 — 기존 v0.5.x 저장 파일은 자동으로 `Knobs::default()` 로 로드 (마이그레이션 테스트 통과).
+
+**Modal UI** (lib.rs + main.rs 동일 패턴)
+- `ModalMode::Knobs { cursor: usize }` 변형 추가.
+- `K`/`k` 키로 모달 열기, `Esc`/`q`/`k`/`K` 로 닫기.
+- `j`/`k` (또는 `↓`/`↑`) 슬라이더 위/아래 이동 (15에서 `k` 는 0으로 래핑).
+- `h`/`l` (또는 `←`/`→`) 값을 정의된 step 만큼 ±이동, 범위 클램프.
+- `r` 현재 슬라이더 1개만 기본값으로, `R` 전체 16개 기본값으로 리셋.
+- `crates/app/src/lib.rs` + `crates/app/src/main.rs` 양쪽에 동일한 핸들러 및 60×18 중앙 정렬 드로어 (한 행당 슬라이더 1개 + 회색 unwired 마커 + 회색 컨트롤 힌트). 한국어/영어 로케일 둘 다 지원.
+
+**5 wired knobs** (실제 게임 룰에 반영):
+- `vision.range` — `Viewshed::new` 의 range 인자로 반영.
+- `enemy.hp_mul` — `spawn_enemy` 의 `Health::new` 값에 곱 (≥1 클램프).
+- `enemy.atk_mul` — `spawn_enemy` 의 `Stats.strength`/`attack_bonus` 에 곱.
+- `monster.density` — `0.0` 일 때 중간 등급 적 ('B' 곰) 스폰 생략.
+- `max_floors` — `descend_internal` 의 임계값을 `effective_max_floors()` 메서드로 대체. 기본값 8, 슬라이더로 늘릴 수 있음.
+
+나머지 11개 슬라이더 (hp.start, mp.start, food.start, enemy.speed_mul, scaling.floor, autopilot.mode, autopilot.speed, pacing.recovery, relic.density, gold.density, trap.density) 는 UI는 표시되지만 v0.6.0에서는 게임에 반영되지 않으며 v0.6.1 에서 연동 예정.
+
+**Tests**
+- 신규: 16개 인라인 테스트 (knobs.rs 6, meta 1, lib.rs knob_tests 9) — Ron 마이그레이션, 모달 열기/닫기, 슬라이더 조정 (±step + 클램프), r/R 리셋, 5개 wiring 모두.
+- 전체: 122 테스트 통과 (이전 106 + 16 추가, 0 실패).
+- `lib.rs` 와 `main.rs` 동기화: 사용자가 "main.rs만 작업하고 lib.rs 미동기화" 하지 말 것을 강조 — 이번 사이클은 두 파일을 명시적으로 같은 단계에서 함께 업데이트했습니다.
+
+Test totals: 122 passed (was 106; +16 new for v0.6.0).
+
 ## [Unreleased]
 
 ### v0.5.28 — Fix: enemy-attack death path

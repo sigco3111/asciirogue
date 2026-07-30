@@ -13,6 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::knobs::Knobs;
+
 /// Permanent bonuses carried between runs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SoulRemembrance {
@@ -26,6 +28,10 @@ pub struct SoulRemembrance {
     pub last_wager_gold: u32,
     /// Total clears of the 8-floor run.
     pub clears: u32,
+    /// v0.6.0 — 16 sliders tuning gameplay rules (SPEC §20).
+    /// `#[serde(default)]` ensures pre-v0.6.0 save files load cleanly.
+    #[serde(default)]
+    pub knobs: Knobs,
 }
 
 impl SoulRemembrance {
@@ -36,7 +42,12 @@ impl SoulRemembrance {
     /// Apply end-of-run rewards to this remembrance.
     /// `final_floor` is the deepest floor reached (1..=8).
     /// `gold_remaining` is the gold left in inventory when the run ended.
-    pub fn on_run_end(&mut self, final_floor: u32, gold_remaining: u32, bosses_killed_this_run: u32) {
+    pub fn on_run_end(
+        &mut self,
+        final_floor: u32,
+        gold_remaining: u32,
+        bosses_killed_this_run: u32,
+    ) {
         if final_floor >= 8 {
             self.clears = self.clears.saturating_add(1);
             // Clearing grants a champion soul slot (cap 30).
@@ -100,9 +111,27 @@ mod tests {
             marks_of_departed: 2,
             last_wager_gold: 84,
             clears: 1,
+            knobs: Knobs::default(),
         };
         let ron_str = ron::to_string(&m).unwrap();
         let back: SoulRemembrance = ron::from_str(&ron_str).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn soul_remembrance_loads_old_ron_without_knobs_field() {
+        // v0.5.x saved SoulRemembrance had only 5 fields. After v0.6.0 adds
+        // the `knobs` field, an existing save file must still load cleanly —
+        // the missing field is filled by `Knobs::default()`.
+        let old_save = "(champion_count: 2, wisps: 1, marks_of_departed: 3, \
+                        last_wager_gold: 84, clears: 1)";
+        let r: SoulRemembrance = ron::from_str(old_save).unwrap();
+        assert_eq!(r.champion_count, 2);
+        assert_eq!(r.wisps, 1);
+        assert_eq!(r.marks_of_departed, 3);
+        assert_eq!(r.last_wager_gold, 84);
+        assert_eq!(r.clears, 1);
+        // The new field must be the spec-§20 default.
+        assert_eq!(r.knobs, Knobs::default());
     }
 }

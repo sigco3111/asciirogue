@@ -1,19 +1,20 @@
 //! asciirogue — Korean-first TUI roguelike with half-block visuals.
 
 use anyhow::{Context, Result};
-use asciirogue_combat::{attack, ai};
+use asciirogue_combat::{ai, attack};
 pub use asciirogue_core::EquipSlot;
 use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
+    knobs::{KnobId, Knobs},
     meta::SoulRemembrance,
-    vision, Ai, AiKind, Direction, Equipment, FloorTheme, Health, Inventory, Item,
-    ItemKind, Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
+    vision, Ai, AiKind, Direction, Equipment, FloorTheme, Health, Inventory, Item, ItemKind, Mana,
+    Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use crossterm::terminal::disable_raw_mode;
 use crossterm::execute;
+use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::LeaveAlternateScreen;
 use hecs::World;
 use ratatui::layout::{Constraint, Layout};
@@ -85,13 +86,24 @@ pub struct App {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ModalMode {
     Closed,
-    Inventory { cursor: usize },
+    Inventory {
+        cursor: usize,
+    },
     /// v0.5.11: "▼ 다음 층으로 내려갈까?" — y/Enter = descend, n/Esc = cancel.
     /// v0.5.21: `choice` carries the current selection so the player can
     /// navigate with arrow keys / Tab and confirm with Enter. `true` =
     /// yes (descend), `false` = no (cancel). The default is `true` —
     /// players walked to the stairs on purpose, descending is natural.
-    ConfirmStairs { choice: bool },
+    ConfirmStairs {
+        choice: bool,
+    },
+    /// v0.6.0: 16-knob slider UI (SPEC §20). `cursor` is the index into
+    /// `KnobId::COUNT` — `cursor=0` is HpStart, `cursor=15` is MaxFloors.
+    /// Open with `k`/`K`, close with `Esc`/`q`/`k` (toggle). j/k nav,
+    /// h/l ±step, r reset one, R reset all.
+    Knobs {
+        cursor: usize,
+    },
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -104,13 +116,7 @@ const INVENTORY_MAX: usize = 8;
 impl App {
     pub fn new(base_seed: u64) -> Self {
         let loc = Locale::from_code(&std::env::var("ASCIITROGUE_LANG").unwrap_or_default());
-        Self::new_at_with(
-            base_seed,
-            1,
-            load_remembrance(),
-            loc,
-            0,
-        )
+        Self::new_at_with(base_seed, 1, load_remembrance(), loc, 0)
     }
 
     /// Convenience for tests: a fresh App with no saved meta.
@@ -139,11 +145,16 @@ impl App {
             .map(|r| r.center())
             .unwrap_or((MAP_W / 2, MAP_H / 2));
         let player_pos = TilePos(px, py);
+        let vision_radius = {
+            let raw = remembrance.knobs.get(KnobId::VisionRange).round() as i32;
+            let (lo, hi) = Knobs::range_of(KnobId::VisionRange);
+            raw.max(lo as i32).min(hi as i32)
+        };
         let player = world.spawn((
             Position(player_pos),
             Player,
             Renderable::new('@', 0xFF_D6_5A),
-            Viewshed::new(VIEW_RADIUS, MAP_W, MAP_H),
+            Viewshed::new(vision_radius, MAP_W, MAP_H),
             Health::new(40 + 5 * (floor as i32 - 1)),
             Mana::new(15 + 2 * (floor as i32 - 1)),
             Stats::new(10, 10, 8, 8, 10),
@@ -153,14 +164,16 @@ impl App {
         ));
 
         // Populate monsters and loot scaled by floor.
-        populate_floor(&mut world, &dungeon, floor, theme);
+        populate_floor(&mut world, &dungeon, floor, theme, &remembrance.knobs);
 
         let blocks = build_blocks(&dungeon);
         let boss_defeated = floor > BOSS_FLOOR; // past-boss floors count as cleared
 
         // Compose an opening log line using the active locale.
-        let startup_args: [&dyn std::fmt::Display; 2] =
-            [&floor as &dyn std::fmt::Display, &theme.label() as &dyn std::fmt::Display];
+        let startup_args: [&dyn std::fmt::Display; 2] = [
+            &floor as &dyn std::fmt::Display,
+            &theme.label() as &dyn std::fmt::Display,
+        ];
         let startup_msg = format!(
             "{} — {}",
             t_format_with_locale(I18nKey::MsgFloorEntered, locale, &startup_args),
@@ -195,7 +208,11 @@ impl App {
     }
 
     pub fn floor_label(&self) -> String {
-        format!("{}F {}", self.floor, FloorTheme::from_depth(self.floor).label())
+        format!(
+            "{}F {}",
+            self.floor,
+            FloorTheme::from_depth(self.floor).label()
+        )
     }
 
     /// v0.5.9: probe-side accessor for tests and the modal render. Returns
@@ -249,6 +266,11 @@ impl App {
                 // after the player has answered (prevents "ghost popup").
                 // v0.5.17: simplified modal handler. Always log to confirm
                 // the branch was reached (debug aid).
+                // v0.6.0: knobs modal owns input while open.
+                if let ModalMode::Knobs { cursor } = self.modal {
+                    self.handle_knobs_key(k.code, cursor);
+                    return;
+                }
                 if let ModalMode::ConfirmStairs { choice } = self.modal {
                     self.modal_redraws = 0;
                     self.log(format!("[modal] key={:?}", k.code));
@@ -339,7 +361,10 @@ impl App {
                     KeyCode::Char('?') => {
                         // In-screen help (one message burst).
                         self.log("h/j/k/l 이동 | yubn 대각 | 화살표 이동".to_string());
-                        self.log("g/$ 줍기 | i 인벤토리 | p 포션 | > 내려가기 | R 새 게임 | q 종료".to_string());
+                        self.log(
+                            "g/$ 줍기 | i 인벤토리 | p 포션 | > 내려가기 | R 새 게임 | q 종료"
+                                .to_string(),
+                        );
                         self.log("S 영혼 저장 | L 언어 토글 | ? 도움말".to_string());
                     }
                     KeyCode::Char('r') => {
@@ -380,23 +405,25 @@ impl App {
                         // or full-inventory refusal.
                         let item = Item::potion_hp();
                         let label = format!("{} (+{})", item.name, item.bonus);
-                        let outcome = if let Ok(mut inv) =
-                            self.world.get::<&mut Inventory>(self.player)
-                        {
-                            match inv.push(item) {
-                                Ok(_) => "added".to_string(),
-                                Err(()) => "full".to_string(),
-                            }
-                        } else {
-                            "no_inventory".to_string()
-                        };
+                        let outcome =
+                            if let Ok(mut inv) = self.world.get::<&mut Inventory>(self.player) {
+                                match inv.push(item) {
+                                    Ok(_) => "added".to_string(),
+                                    Err(()) => "full".to_string(),
+                                }
+                            } else {
+                                "no_inventory".to_string()
+                            };
                         match outcome.as_str() {
                             "added" => self.log(format!("[치트] 물약 추가: {}", label)),
                             "full" => self.log("[치트] 인벤토리가 가득 차서 추가 실패"),
                             _ => self.log("[치트] 인벤토리가 없어 추가 실패"),
                         }
                     }
-                    KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
+                    KeyCode::Char('g')
+                    | KeyCode::Char('G')
+                    | KeyCode::Char('$')
+                    | KeyCode::Char(',') => {
                         // `g` is the documented pickup key; `$` (gold sign) and
                         // `,` are intuitive aliases the player will reach
                         // for when they see a $ glyph.
@@ -404,7 +431,10 @@ impl App {
                         match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
                             PickupOutcome::Picked => {
                                 if gold_gained > 0 && self.inventory_has_non_gold() {
-                                    self.log(format!("아이템 + 골드 {}을 주웠습니다.", gold_gained));
+                                    self.log(format!(
+                                        "아이템 + 골드 {}을 주웠습니다.",
+                                        gold_gained
+                                    ));
                                 } else if gold_gained > 0 {
                                     self.log(format!("골드 +{}!", gold_gained));
                                 } else {
@@ -437,6 +467,10 @@ impl App {
                         } else {
                             self.log("사용할 물약이 없습니다.");
                         }
+                    }
+                    KeyCode::Char('k') | KeyCode::Char('K') => {
+                        // v0.6.0: open the 16-knob slider modal.
+                        self.modal = ModalMode::Knobs { cursor: 0 };
                     }
                     d if dir.is_some() => {
                         if let Some(dir) = dir {
@@ -474,9 +508,9 @@ impl App {
         // items (loot) have no Health component; if we let them through
         // player_attack returns early on `already_dead` and the stairs
         // modal trigger at the bottom of this function never runs.
-        let target_entity = self.entity_at(next).filter(|&e| {
-            self.world.get::<&Health>(e).is_ok()
-        });
+        let target_entity = self
+            .entity_at(next)
+            .filter(|&e| self.world.get::<&Health>(e).is_ok());
         if let Some(entity) = target_entity {
             self.player_attack(entity);
             self.tick = self.tick.wrapping_add(1);
@@ -524,23 +558,18 @@ impl App {
         if self.floor == BOSS_FLOOR && !self.boss_defeated {
             self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
             false
-        } else if next_floor > MAX_FLOORS {
+        } else if next_floor > self.effective_max_floors() {
             self.log(i18n::t_for(I18nKey::MsgAlreadyAtBottom, self.locale));
             self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
             let _ = save_remembrance(&self.remembrance);
             self.log(format!(
                 "쏠쏠리의 방 클리어! clears={}, soul_wisps={}",
-                self.remembrance.clears,
-                self.remembrance.wisps,
+                self.remembrance.clears, self.remembrance.wisps,
             ));
             false
         } else {
             let args: [&dyn std::fmt::Display; 1] = [&next_floor as &dyn std::fmt::Display];
-            let msg = t_format_with_locale(
-                I18nKey::MsgStairDescendOk,
-                self.locale,
-                &args,
-            );
+            let msg = t_format_with_locale(I18nKey::MsgStairDescendOk, self.locale, &args);
             let rem = self.remembrance.clone();
             let locale = self.locale;
             let gold = self.gold;
@@ -554,7 +583,11 @@ impl App {
     /// Clear all enemy cooldowns. Called after `enemy_take_turns` so the
     /// NEXT player action gets a fresh enemy phase.
     fn clear_enemy_cooldowns(&mut self) {
-        let _ = self.world.query::<&mut Ai>().iter().for_each(|(_, ai)| ai.cooldown = 0);
+        let _ = self
+            .world
+            .query::<&mut Ai>()
+            .iter()
+            .for_each(|(_, ai)| ai.cooldown = 0);
     }
 
     pub fn entity_at(&self, pos: TilePos) -> Option<hecs::Entity> {
@@ -626,13 +659,7 @@ impl App {
             .world
             .query::<&Health>()
             .iter()
-            .filter_map(|(e, h)| {
-                if h.is_dead() {
-                    Some(e)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(e, h)| if h.is_dead() { Some(e) } else { None })
             .collect();
         let mut boss: Option<hecs::Entity> = None;
         for &e in &dead {
@@ -747,8 +774,7 @@ impl App {
             let can_see_player_now = {
                 let dx = (player_pos.0 - enemy_pos.0).abs();
                 let dy = (player_pos.1 - enemy_pos.1).abs();
-                dx.max(dy) <= ai_behav.vision
-                    && los_clear(enemy_pos, player_pos, sight_blocks)
+                dx.max(dy) <= ai_behav.vision && los_clear(enemy_pos, player_pos, sight_blocks)
             };
             // Update last_known_player whenever the enemy sees the player.
             if can_see_player_now {
@@ -766,8 +792,7 @@ impl App {
                 } else {
                     ai_behav.last_known_player
                 },
-                |x, y| is_passable(&self.dungeon, x, y)
-                    && self.entity_at(TilePos(x, y)).is_none(),
+                |x, y| is_passable(&self.dungeon, x, y) && self.entity_at(TilePos(x, y)).is_none(),
                 sight_blocks,
             );
             match action {
@@ -784,9 +809,7 @@ impl App {
                         continue;
                     }
                     let np = TilePos(enemy_pos.0 + dx, enemy_pos.1 + dy);
-                    if is_passable(&self.dungeon, np.0, np.1)
-                        && self.entity_at(np).is_none()
-                    {
+                    if is_passable(&self.dungeon, np.0, np.1) && self.entity_at(np).is_none() {
                         if let Ok(mut p) = self.world.get::<&mut Position>(entity) {
                             p.0 = np;
                         }
@@ -897,11 +920,7 @@ impl App {
         ) {
             format!(
                 "HP {}/{}  MP {}/{}  G {}",
-                h.current,
-                h.max,
-                m.current,
-                m.max,
-                self.gold
+                h.current, h.max, m.current, m.max, self.gold
             )
         } else {
             format!("?  G {}", self.gold)
@@ -952,17 +971,24 @@ impl App {
         let mut near_pickup_tiles: std::collections::HashSet<(i32, i32)> =
             std::collections::HashSet::new();
         if let Ok(ppos) = self.world.get::<&Position>(self.player) {
-            let px = ppos.0.0;
-            let py = ppos.0.1;
+            let px = ppos.0 .0;
+            let py = ppos.0 .1;
             let neighbours = [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)];
             for (_, (pp, _it)) in self.world.query::<(&Position, &Item)>().iter() {
-                let k = (pp.0.0, pp.0.1);
+                let k = (pp.0 .0, pp.0 .1);
                 if k == (px, py) || neighbours.contains(&k) {
                     near_pickup_tiles.insert(k);
                 }
             }
         }
-        draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot, &near_pickup_tiles);
+        draw_world(
+            frame,
+            centered,
+            &self.dungeon,
+            &self.world,
+            &viewshed_snapshot,
+            &near_pickup_tiles,
+        );
 
         // Footer — last few messages + control hint.
         let recent = self
@@ -996,6 +1022,10 @@ impl App {
         // buried in the truncated footer log.
         if self.game_over {
             self.draw_death_screen(frame, chunks[1]);
+        }
+        // v0.6.0: knobs slider modal overlay.
+        if let ModalMode::Knobs { cursor } = self.modal {
+            self.draw_knobs_modal(frame, area, cursor);
         }
     }
 
@@ -1043,6 +1073,154 @@ impl App {
             .alignment(ratatui::layout::Alignment::Center)
             .wrap(Wrap { trim: false });
         frame.render_widget(para, area);
+    }
+
+    /// v0.6.0: dispatch one knobs-modal key.
+    fn handle_knobs_key(&mut self, code: KeyCode, cursor: usize) {
+        use asciirogue_core::knobs::{KnobId, Knobs};
+        let knob_count = KnobId::COUNT;
+        let next_cursor = |cur: usize, delta: i32| -> usize {
+            let n = knob_count as i32;
+            let c = cur as i32 + delta;
+            ((c % n + n) % n) as usize
+        };
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.modal = ModalMode::Knobs {
+                    cursor: next_cursor(cursor, 1),
+                };
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.modal = ModalMode::Knobs {
+                    cursor: next_cursor(cursor, -1),
+                };
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if let Some(id) = KnobId::from_index(cursor) {
+                    let v = self.remembrance.knobs.get(id);
+                    let step = Knobs::step_of(id);
+                    self.remembrance.knobs.set_clamped(id, v + step);
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if let Some(id) = KnobId::from_index(cursor) {
+                    let v = self.remembrance.knobs.get(id);
+                    let step = Knobs::step_of(id);
+                    self.remembrance.knobs.set_clamped(id, v - step);
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Some(id) = KnobId::from_index(cursor) {
+                    self.remembrance.knobs.reset_one(id);
+                }
+            }
+            KeyCode::Char('R') => {
+                self.remembrance.knobs.reset();
+            }
+            KeyCode::Esc | KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Char('q') => {
+                self.modal = ModalMode::Closed;
+            }
+            _ => {}
+        }
+    }
+
+    /// v0.6.0: render the 60×18 centered knob slider modal.
+    fn draw_knobs_modal(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        cursor: usize,
+    ) {
+        use asciirogue_core::knobs::{KnobId, Knobs};
+        use ratatui::layout::{Constraint, Direction, Layout, Margin};
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+
+        // Centered 60×18 modal — matches inventory modal footprint.
+        let w = 60u16.min(area.width);
+        let h = 18u16.min(area.height);
+        let modal_area = ratatui::layout::Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        frame.render_widget(Clear, modal_area);
+
+        let title = match self.locale {
+            Locale::Korean => " 노브 (K/Esc: 닫기) ",
+            Locale::English => " Knobs (K/Esc: close) ",
+        };
+        let block = Block::default().title(title).borders(Borders::ALL);
+        frame.render_widget(block, modal_area);
+        let inner = modal_area.inner(Margin::new(1, 1));
+
+        // 16 knob rows + 1 controls row + 1 spacer = 18
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                std::iter::repeat(Constraint::Length(1))
+                    .take(KnobId::COUNT)
+                    .chain(std::iter::once(Constraint::Min(1))),
+            )
+            .split(inner);
+
+        let cursor_style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        let unwired_style = Style::default().fg(Color::DarkGray);
+        let normal_style = Style::default();
+
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap(); // COUNT is the bound, so always Some
+            let label = Knobs::label_of(id);
+            let value = self.remembrance.knobs.get(id);
+            let (lo, hi) = Knobs::range_of(id);
+            let default = Knobs::default_of(id);
+            let text = format!(
+                "{:>2}. {:<10}  {:>6.2}  (def {:>5.2}, {:>4.2}..{:>4.2})",
+                i + 1,
+                label,
+                value,
+                default,
+                lo,
+                hi,
+            );
+            let style = if i == cursor {
+                cursor_style
+            } else if matches!(
+                id,
+                KnobId::VisionRange
+                    | KnobId::EnemyHpMul
+                    | KnobId::EnemyAtkMul
+                    | KnobId::MonsterDensity
+                    | KnobId::MaxFloors
+            ) {
+                normal_style
+            } else {
+                unwired_style
+            };
+            let p = Paragraph::new(Span::styled(text, style));
+            frame.render_widget(p, chunks[i]);
+        }
+
+        let hint = match self.locale {
+            Locale::Korean => "j/k 이동 · h/l ±스텝 · r 이항목 기본값 · R 전체 기본값 · Esc 닫기",
+            Locale::English => "j/k nav · h/l ±step · r reset one · R reset all · Esc close",
+        };
+        let hint_p = Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray)))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(hint_p, chunks[KnobId::COUNT]);
+    }
+
+    /// v0.6.0: replace the legacy `MAX_FLOORS` const with a knob-driven
+    /// ceiling. Falls back to 8 if the knob is out of range or zero; the
+    /// minimum is 1 (an out-of-range read can clamp down to 0, which we
+    /// never want — an infinite descent makes no sense).
+    fn effective_max_floors(&self) -> u32 {
+        let raw = self.remembrance.knobs.get(KnobId::MaxFloors);
+        let (lo, hi) = Knobs::range_of(KnobId::MaxFloors);
+        let clamped = raw.max(lo).min(hi).round() as i32;
+        clamped.max(1) as u32
     }
 }
 
@@ -1125,9 +1303,11 @@ pub fn spawn_enemy(
     glyph: char,
     name: &str,
     hp: i32,
-    stats: Stats,
+    mut stats: Stats,
     vision: i32,
     kind: AiKind,
+    hp_mul: f32,
+    atk_mul: f32,
 ) {
     if let Some(room) = dungeon.rooms.get(room_idx) {
         let (ex, ey) = room.center();
@@ -1136,10 +1316,13 @@ pub fn spawn_enemy(
             'g' => 0xB4_5A_D2u32, // magenta goblin
             _ => 0xFF_FF_FFu32,
         };
+        let scaled_hp = ((hp as f32) * hp_mul).round().max(1.0) as i32;
+        stats.strength = (((stats.strength as f32) * atk_mul).round().max(0.0)) as i32;
+        stats.attack_bonus = (((stats.attack_bonus as f32) * atk_mul).round().max(0.0)) as i32;
         world.spawn((
             Position(TilePos(ex, ey)),
             Renderable::new(glyph, fg),
-            Health::new(hp),
+            Health::new(scaled_hp),
             stats,
             Ai::new(kind, 100, vision),
             Name(name.to_string()),
@@ -1152,7 +1335,16 @@ pub fn spawn_enemy(
 /// if every neighbor is out of bounds. Used by the boss spawn so the boss
 /// never occupies the same tile as the descent.
 fn pick_non_stairs_tile(room: &asciirogue_procgen::Rect, sx: i32, sy: i32) -> Option<(i32, i32)> {
-    for (dx, dy) in [(0,1), (1,0), (0,-1), (-1,0), (1,1), (1,-1), (-1,-1), (-1,1)] {
+    for (dx, dy) in [
+        (0, 1),
+        (1, 0),
+        (0, -1),
+        (-1, 0),
+        (1, 1),
+        (1, -1),
+        (-1, -1),
+        (-1, 1),
+    ] {
         let nx = sx + dx;
         let ny = sy + dy;
         if room.contains(nx, ny) && (nx != sx || ny != sy) {
@@ -1163,7 +1355,17 @@ fn pick_non_stairs_tile(room: &asciirogue_procgen::Rect, sx: i32, sy: i32) -> Op
 }
 
 /// Spawn monsters + loot scaled by floor number (1..=MAX_FLOORS).
-pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: FloorTheme) {
+pub fn populate_floor(
+    world: &mut World,
+    dungeon: &Dungeon,
+    floor: u32,
+    theme: FloorTheme,
+    knobs: &asciirogue_core::knobs::Knobs,
+) {
+    use asciirogue_core::knobs::KnobId;
+    let hp_mul = knobs.get(KnobId::EnemyHpMul);
+    let atk_mul = knobs.get(KnobId::EnemyAtkMul);
+    let monster_density = knobs.get(KnobId::MonsterDensity);
     // Difficulty scales linearly: HP + attack bonus per floor.
     let scale = floor as i32; // 1..=8
 
@@ -1195,6 +1397,8 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
             Stats::new(3, 8, 1, 1, 5),
             8,
             AiKind::Coward,
+            hp_mul,
+            atk_mul,
         );
         idx += 1;
         // Tier 2: a goblin (or skeleton for catacombs+).
@@ -1222,10 +1426,12 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
             Stats::new(5, 6, 2, 2, 7),
             9,
             AiKind::Chase,
+            hp_mul,
+            atk_mul,
         );
     }
     // Spawn a tougher prowler if floor is mid-tier or beyond (room 3+).
-    if room_count >= 4 && floor >= 3 {
+    if room_count >= 4 && floor >= 3 && monster_density > 0.0 {
         spawn_enemy(
             world,
             dungeon,
@@ -1236,6 +1442,8 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
             Stats::new(9, 4, 1, 1, 12),
             8,
             AiKind::Chase,
+            hp_mul,
+            atk_mul,
         );
     }
 
@@ -1254,13 +1462,17 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
             // walk a 4-neighbor offset from the stairs tile; fall back to
             // the room center if every neighbor is out of bounds.
             let (sx, sy) = stairs.map(|p| (p.0, p.1)).unwrap_or_else(|| room.center());
-            let (bx, by) = pick_non_stairs_tile(room, sx, sy)
-                .unwrap_or_else(|| room.center());
+            let (bx, by) = pick_non_stairs_tile(room, sx, sy).unwrap_or_else(|| room.center());
+            let boss_hp = (((120 + scale * 8) as f32) * hp_mul).round().max(1.0) as i32;
+            let boss_str = (((12) as f32) * atk_mul).round().max(0.0) as i32;
+            let boss_atk_bonus = (((6) as f32) * atk_mul).round().max(0.0) as i32;
+            let mut boss_stats = Stats::new(boss_str, 8, 6, 6, 16);
+            boss_stats.attack_bonus = boss_atk_bonus;
             world.spawn((
                 Position(TilePos(bx, by)),
                 Renderable::new('D', 0xFF_FF_40),
-                Health::new(120 + scale * 8),
-                Stats::new(12, 8, 6, 6, 16),
+                Health::new(boss_hp),
+                boss_stats,
                 Ai::new(AiKind::Chase, 100, 10),
                 Name("황녀 🐲".into()),
             ));
@@ -1281,9 +1493,7 @@ pub fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: F
         let cx_center = (room.x1 + room.x2) / 2;
         let cy_center = (room.y1 + room.y2) / 2;
         let (cx, cy) = match dungeon.stairs {
-            Some(s) if (s.0, s.1) == (cx_center, cy_center) => {
-                (cx_center + 1, cy_center)
-            }
+            Some(s) if (s.0, s.1) == (cx_center, cy_center) => (cx_center + 1, cy_center),
             _ => (cx_center, cy_center),
         };
         let cx = cx.max(room.x1 + 1);
@@ -1379,8 +1589,9 @@ pub fn pick_up_outcome(
         TilePos(player_pos.0, player_pos.1 - 1),
         TilePos(player_pos.0, player_pos.1 + 1),
     ];
-    let wanted: std::collections::HashSet<TilePos> =
-        std::iter::once(here).chain(neighbours.iter().copied()).collect();
+    let wanted: std::collections::HashSet<TilePos> = std::iter::once(here)
+        .chain(neighbours.iter().copied())
+        .collect();
     // Items in entity-id order so it's stable across runs.
     let item_entities: Vec<hecs::Entity> = world
         .query::<(&Position, &Item)>()
@@ -1548,7 +1759,9 @@ pub fn use_inventory_at(world: &mut World, player: hecs::Entity, idx: usize) -> 
                 String::from("마나 물약...")
             }
         }
-        ItemKind::Weapon | ItemKind::Armor => format!("장비는 (e) 키로 장착하세요. ({}{})", item.glyph, item.name),
+        ItemKind::Weapon | ItemKind::Armor => {
+            format!("장비는 (e) 키로 장착하세요. ({}{})", item.glyph, item.name)
+        }
         ItemKind::Coin => {
             // v0.5.9: coins never enter inventory any more. If we reach
             // here it's because of legacy data; report the bonus so the
@@ -1716,11 +1929,7 @@ pub fn toggle_equip_at(world: &mut World, player: hecs::Entity, idx: usize) -> O
 
 /// v0.5.7: Drop the item at `idx` onto the player's tile. If the tile is
 /// already occupied by another ground item, the drop fails.
-pub fn drop_inventory_at(
-    world: &mut World,
-    player: hecs::Entity,
-    idx: usize,
-) -> Option<String> {
+pub fn drop_inventory_at(world: &mut World, player: hecs::Entity, idx: usize) -> Option<String> {
     let item = {
         let mut inv = world.get::<&mut Inventory>(player).ok()?;
         inv.take(idx)?
@@ -1737,7 +1946,11 @@ pub fn drop_inventory_at(
         let _ = inv.put_at(idx, item);
         return Some("이 타일에는 이미 다른 아이템이 있습니다.".to_string());
     }
-    world.spawn((Position(pos), Renderable::new(item.glyph, item.fg_rgb), item));
+    world.spawn((
+        Position(pos),
+        Renderable::new(item.glyph, item.fg_rgb),
+        item,
+    ));
     Some("아이템을 바닥에 내려놓았습니다.".to_string())
 }
 
@@ -1747,9 +1960,10 @@ pub fn use_first_potion(world: &mut World, player: hecs::Entity) -> Option<Strin
     let mut idx: Option<usize> = None;
     for (i, slot) in inv.slots.iter().enumerate() {
         if let Some(it) = slot {
-            if matches!(it.kind, asciirogue_core::ItemKind::HealthPotion
-                              | asciirogue_core::ItemKind::ManaPotion)
-            {
+            if matches!(
+                it.kind,
+                asciirogue_core::ItemKind::HealthPotion | asciirogue_core::ItemKind::ManaPotion
+            ) {
                 idx = Some(i);
                 break;
             }
@@ -1874,17 +2088,22 @@ pub fn dump_to_stdout(seed: u64, count: u32) -> Result<()> {
         };
         let blocks = build_blocks(dungeon);
         let mut visible_buf: Vec<TilePos> = Vec::new();
-        vision::compute(player_pos, MAP_W, MAP_H, VIEW_RADIUS, &blocks, &mut visible_buf);
-        let visible_set: std::collections::HashSet<(i32, i32)> = visible_buf
-            .iter()
-            .map(|&TilePos(x, y)| (x, y))
-            .collect();
+        vision::compute(
+            player_pos,
+            MAP_W,
+            MAP_H,
+            VIEW_RADIUS,
+            &blocks,
+            &mut visible_buf,
+        );
+        let visible_set: std::collections::HashSet<(i32, i32)> =
+            visible_buf.iter().map(|&TilePos(x, y)| (x, y)).collect();
 
         // Build an entity lookup including items (rendered as their item glyph).
         let entity_at: std::collections::HashMap<(i32, i32), char> = world
             .query::<(&Position, &Renderable)>()
             .iter()
-            .map(|(_, (p, r))| ((p.0.0, p.0.1), r.glyph))
+            .map(|(_, (p, r))| ((p.0 .0, p.0 .1), r.glyph))
             .collect();
 
         let theme = FloorTheme::from_depth(i);
@@ -1925,21 +2144,19 @@ pub fn dump_to_stdout(seed: u64, count: u32) -> Result<()> {
     Ok(())
 }
 
-
 /// Re-export parse_seed from old main.rs as a library function.
 pub fn parse_seed(s: &str) -> anyhow::Result<u64> {
     if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         return u64::from_str_radix(rest, 16)
             .map_err(|e| anyhow::anyhow!("invalid hex seed: {}", e));
     }
-    s.parse::<u64>().map_err(|e| anyhow::anyhow!("invalid decimal seed: {}", e))
+    s.parse::<u64>()
+        .map_err(|e| anyhow::anyhow!("invalid decimal seed: {}", e))
 }
 
 /// Entry point used by both `main.rs` (the actual binary) and any probe
 /// or test binary. We keep the same body as the original main() so the TUI
 /// behavior matches.
-
-
 
 /// Library entrypoint: parses CLI args, dispatches `--dump` / `--help` /
 /// panic hook + `run()`. Used by both the binary main and any test/probe
@@ -2000,7 +2217,6 @@ pub fn run_main() -> anyhow::Result<()> {
     }));
     run().context("asciirogue runtime error")
 }
-
 
 // ── probe-friendly API ───────────────────────────────────────────────────────
 //
@@ -2097,14 +2313,22 @@ pub fn nearest_stairs_info(
     ];
 
     while let Some((x, y, d)) = frontier.pop_front() {
-        if d >= MAX_STAIRS_SEARCH { break; }
+        if d >= MAX_STAIRS_SEARCH {
+            break;
+        }
         for (dx, dy, dir) in NEIGHBORS.iter() {
             let nx = x + dx;
             let ny = y + dy;
-            if nx < 0 || ny < 0 || nx >= w || ny >= h { continue; }
-            if !is_passable(dungeon, nx, ny) { continue; }
+            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                continue;
+            }
+            if !is_passable(dungeon, nx, ny) {
+                continue;
+            }
             let ni = idx(nx, ny);
-            if visited[ni] { continue; }
+            if visited[ni] {
+                continue;
+            }
             visited[ni] = true;
             let first_dir = if d == 0 { *dir } else { prev_dir[idx(x, y)] };
             prev_dir[ni] = first_dir;
@@ -2116,7 +2340,6 @@ pub fn nearest_stairs_info(
     }
     None
 }
-
 
 /// Walk the dungeon from the player until we hit a ground item (Item + Position
 /// entity). Returns the BFS distance in tiles, the cardinal direction of the
@@ -2138,7 +2361,7 @@ pub fn nearest_pickup_info(
     let mut item_tiles: std::collections::HashMap<(i32, i32), char> =
         std::collections::HashMap::new();
     for (_, (p, it)) in world.query::<(&Position, &Item)>().iter() {
-        item_tiles.insert((p.0.0, p.0.1), it.glyph);
+        item_tiles.insert((p.0 .0, p.0 .1), it.glyph);
     }
     if item_tiles.is_empty() {
         return None;
@@ -2165,14 +2388,22 @@ pub fn nearest_pickup_info(
         (1, 0, Direction::Right),
     ];
     while let Some((x, y, d)) = frontier.pop_front() {
-        if d >= MAX_PICKUP_SEARCH { break; }
+        if d >= MAX_PICKUP_SEARCH {
+            break;
+        }
         for (dx, dy, dir) in NEIGHBORS.iter() {
             let nx = x + dx;
             let ny = y + dy;
-            if nx < 0 || ny < 0 || nx >= w || ny >= h { continue; }
-            if !is_passable(dungeon, nx, ny) { continue; }
+            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                continue;
+            }
+            if !is_passable(dungeon, nx, ny) {
+                continue;
+            }
             let ni = idx(nx, ny);
-            if visited[ni] { continue; }
+            if visited[ni] {
+                continue;
+            }
             visited[ni] = true;
             let first_dir = if d == 0 { *dir } else { prev_dir[idx(x, y)] };
             prev_dir[ni] = first_dir;
@@ -2193,7 +2424,10 @@ mod stairs_info_tests {
     use asciirogue_core::Position;
     use asciirogue_procgen::{bsp, Tile};
 
-    fn fresh_world_with_player(dungeon: &Dungeon, player_pos: TilePos) -> (hecs::World, hecs::Entity) {
+    fn fresh_world_with_player(
+        dungeon: &Dungeon,
+        player_pos: TilePos,
+    ) -> (hecs::World, hecs::Entity) {
         let mut world = hecs::World::new();
         let p = world.spawn((Position(player_pos),));
         (world, p)
@@ -2205,7 +2439,10 @@ mod stairs_info_tests {
         let d = bsp::generate(60, 24, seed, bsp::Config::default());
         let last = d.rooms.last().unwrap();
         let (sx, sy) = last.center();
-        assert!(matches!(d.at(sx, sy), Tile::StairsDown), "stairs must be in last room");
+        assert!(
+            matches!(d.at(sx, sy), Tile::StairsDown),
+            "stairs must be in last room"
+        );
         // Player starts in first room — set them in a passable tile in the first room
         let first = d.rooms.first().unwrap();
         let (px, py) = first.center();
@@ -2214,8 +2451,12 @@ mod stairs_info_tests {
         assert!(info.is_some(), "stairs must be reachable from first room");
         let (dist, _dir, glyph) = info.unwrap();
         assert_eq!(glyph, '▼');
-        assert!(dist > 0 && dist <= super::MAX_STAIRS_SEARCH,
-            "distance {} must be in (0, MAX_STAIRS_SEARCH={}]", dist, super::MAX_STAIRS_SEARCH);
+        assert!(
+            dist > 0 && dist <= super::MAX_STAIRS_SEARCH,
+            "distance {} must be in (0, MAX_STAIRS_SEARCH={}]",
+            dist,
+            super::MAX_STAIRS_SEARCH
+        );
     }
 
     #[test]
@@ -2250,13 +2491,18 @@ mod stairs_gate_tests {
         let mut app = App::new_at(seed, 1);
         // Player starts in first room — that is NOT a StairsDown tile.
         let pos = app.world.get::<&Position>(app.player).unwrap().0;
-        assert!(!matches!(app.dungeon.at(pos.0, pos.1), Tile::StairsDown),
-            "first room must not be the stairs tile");
+        assert!(
+            !matches!(app.dungeon.at(pos.0, pos.1), Tile::StairsDown),
+            "first room must not be the stairs tile"
+        );
         // The gate's `>` handler returns early if `can_descend` is false.
         // We can't easily call handle() without a ratatui backend, but we
         // can verify the gate logic directly:
         let on_stairs = matches!(app.dungeon.at(pos.0, pos.1), Tile::StairsDown);
-        assert!(!on_stairs, "gate must NOT permit descent when not on stairs");
+        assert!(
+            !on_stairs,
+            "gate must NOT permit descent when not on stairs"
+        );
     }
 
     #[test]
@@ -2319,7 +2565,7 @@ mod confirm_stairs_tests {
             .world
             .query::<(&Position, &Item)>()
             .iter()
-            .filter(|(_, (p, _))| p.0.0 == sx && p.0.1 == sy)
+            .filter(|(_, (p, _))| p.0 .0 == sx && p.0 .1 == sy)
             .map(|(e, _)| e)
             .collect();
         for e in to_drop {
@@ -2350,7 +2596,10 @@ mod confirm_stairs_tests {
         let start_floor = app.floor;
         app.handle(&char_event('y'));
         // Modal cleared, floor advanced.
-        assert!(matches!(app.modal, ModalMode::Closed), "modal must close after y");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "modal must close after y"
+        );
         assert_eq!(app.floor, start_floor + 1, "y must descend one floor");
     }
 
@@ -2384,12 +2633,16 @@ mod confirm_stairs_tests {
         app.modal = ModalMode::ConfirmStairs { choice: true };
         let start_floor = app.floor;
         app.handle(&char_event('n'));
-        assert!(matches!(app.modal, ModalMode::Closed), "modal must close after n");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "modal must close after n"
+        );
         assert_eq!(app.floor, start_floor, "n must NOT descend");
         // The cancel message should be in the log.
         assert!(
             app.messages().iter().any(|m| m.contains("취소")),
-            "expected cancel message, got logs: {:?}", app.messages()
+            "expected cancel message, got logs: {:?}",
+            app.messages()
         );
     }
 
@@ -2425,8 +2678,10 @@ mod confirm_stairs_tests {
         clear_items(&mut app, sx, sy);
         app.modal = ModalMode::ConfirmStairs { choice: true };
         app.handle(&char_event('h')); // movement key — should be a no-op while modal is open
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
-            "modal must stay open when irrelevant key is pressed");
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "modal must stay open when irrelevant key is pressed"
+        );
     }
 
     #[test]
@@ -2493,10 +2748,12 @@ mod stairs_unblocked_tests {
                 .expect("every floor should have a stairs tile");
             for (_, pos) in app.world.query::<&Position>().iter() {
                 assert_ne!(
-                    (pos.0.0, pos.0.1),
+                    (pos.0 .0, pos.0 .1),
                     (stairs.0, stairs.1),
                     "seed={}: entity occupies the stairs tile at ({},{})",
-                    seed, stairs.0, stairs.1
+                    seed,
+                    stairs.0,
+                    stairs.1
                 );
             }
         }
@@ -2507,7 +2764,7 @@ mod stairs_unblocked_tests {
         let app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
         let stairs = app.dungeon.stairs.expect("boss floor has stairs");
         for (entity, pos) in app.world.query::<&Position>().iter() {
-            if (pos.0.0, pos.0.1) == (stairs.0, stairs.1) {
+            if (pos.0 .0, pos.0 .1) == (stairs.0, stairs.1) {
                 panic!(
                     "boss floor: entity {:?} occupies the stairs tile at ({},{})",
                     entity, stairs.0, stairs.1
@@ -2585,7 +2842,10 @@ mod modal_redraws_tests {
             pos.0 = TilePos(fx, fy);
         }
         app.handle(&char_event('n'));
-        assert_eq!(app.modal_redraws, 0, "n must clear modal_redraws when off stairs");
+        assert_eq!(
+            app.modal_redraws, 0,
+            "n must clear modal_redraws when off stairs"
+        );
     }
 }
 
@@ -2643,9 +2903,14 @@ mod at_stairs_tests {
         app.handle(&char_event('~'));
         assert!(app.at_stairs);
         app.handle(&char_event('n'));
-        assert!(!app.at_stairs, "v0.5.18: n must clear at_stairs even on stairs");
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "v0.5.18: n must close modal even on stairs");
+        assert!(
+            !app.at_stairs,
+            "v0.5.18: n must clear at_stairs even on stairs"
+        );
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close modal even on stairs"
+        );
     }
 
     /// v0.5.16: n clears at_stairs when the player has walked off the
@@ -2665,8 +2930,10 @@ mod at_stairs_tests {
         app.handle(&char_event('n'));
         // Off stairs → modal closed, at_stairs cleared.
         assert!(!app.at_stairs, "n must clear at_stairs when off stairs");
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "n must close modal when off stairs");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "n must close modal when off stairs"
+        );
     }
 
     /// v0.5.15: modal_redraws is bumped to 4 frames for stability.
@@ -2716,8 +2983,10 @@ mod modal_recovery_tests {
         assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
         app.handle(&char_event('n'));
         // v0.5.18: modal closes, at_stairs cleared.
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "v0.5.18: n must close the modal even on stairs");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close the modal even on stairs"
+        );
         assert!(!app.at_stairs, "at_stairs should be cleared");
     }
 
@@ -2770,10 +3039,11 @@ mod v0_5_18_no_recovery_tests {
         app.handle(&char_event('n'));
         // v0.5.18: modal closes, at_stairs cleared, even though we are
         // still on the stairs tile.
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "v0.5.18: n must close the modal even on stairs");
-        assert!(!app.at_stairs,
-            "v0.5.18: at_stairs must be cleared after n");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close the modal even on stairs"
+        );
+        assert!(!app.at_stairs, "v0.5.18: at_stairs must be cleared after n");
     }
 
     /// v0.5.18: after n, the player can move freely (hjkl etc.) because
@@ -2790,16 +3060,20 @@ mod v0_5_18_no_recovery_tests {
         app.handle(&char_event('~'));
         assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
         app.handle(&char_event('n'));
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "v0.5.18: n must close modal");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "v0.5.18: n must close modal"
+        );
         assert!(!app.at_stairs, "v0.5.18: at_stairs must clear");
         // Now press a key that the main match should handle (h = left).
         // We don't assert position change here because enemy AI might
         // interfere, but the modal handler should NOT be entered again.
         let before_modal = app.modal;
         app.handle(&char_event('h'));
-        assert_eq!(before_modal, app.modal,
-            "modal state should not change after n and a non-modal key");
+        assert_eq!(
+            before_modal, app.modal,
+            "modal state should not change after n and a non-modal key"
+        );
     }
 }
 
@@ -2871,7 +3145,229 @@ mod loot_on_stairs_tests {
         // Sanity.
         assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
         app.handle(&char_event('l'));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
-            "stairs modal must fire even when no loot is on the stairs");
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "stairs modal must fire even when no loot is on the stairs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod knob_tests {
+    use super::*;
+    use asciirogue_core::knobs::KnobId;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn key(c: char) -> Event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn fresh_app() -> App {
+        App::new_at(0xCAFE_BABE_DEAD_BEEF, 1)
+    }
+
+    #[test]
+    fn k_opens_knobs_modal_at_cursor_zero_esc_closes() {
+        let mut app = fresh_app();
+        // Initially closed
+        assert!(matches!(app.modal, ModalMode::Closed));
+        // 'k' opens
+        app.handle(&key('k'));
+        match app.modal {
+            ModalMode::Knobs { cursor } => assert_eq!(cursor, 0),
+            other => panic!("expected ModalMode::Knobs{{0}}, got {:?}", other),
+        }
+        // Esc closes
+        app.handle(&press(KeyCode::Esc));
+        assert!(matches!(app.modal, ModalMode::Closed));
+    }
+
+    #[test]
+    fn j_advances_k_retreats_cursor_with_wrap() {
+        let mut app = fresh_app();
+        app.handle(&key('k')); // open at 0
+                               // 'j' advances to 1
+        app.handle(&key('j'));
+        match app.modal {
+            ModalMode::Knobs { cursor } => assert_eq!(cursor, 1),
+            other => panic!("expected cursor 1, got {:?}", other),
+        }
+        // 'k' retreats to 0
+        app.handle(&key('k'));
+        match app.modal {
+            ModalMode::Knobs { cursor } => assert_eq!(cursor, 0),
+            other => panic!("expected cursor 0, got {:?}", other),
+        }
+        // wrap: from 0, 'k' goes to 15
+        app.handle(&key('k'));
+        match app.modal {
+            ModalMode::Knobs { cursor } => assert_eq!(cursor, KnobId::COUNT - 1),
+            other => panic!("expected cursor wrap to 15, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h_l_adjusts_value_with_step_and_clamps() {
+        let mut app = fresh_app();
+        // Set vision_range to default 8.0
+        let v0 = app.remembrance.knobs.get(KnobId::VisionRange);
+        assert!((v0 - 8.0).abs() < 0.001);
+        // Open modal, navigate to VisionRange (cursor 6), then l → 9.0
+        app.handle(&key('k')); // open at 0
+        for _ in 0..6 {
+            app.handle(&key('j'));
+        } // cursor 6
+        app.handle(&key('l')); // +1 step
+        let v1 = app.remembrance.knobs.get(KnobId::VisionRange);
+        // step_for VisionRange is 1.0 (from KNOB_STEP), so v1 = 9.0
+        assert!(
+            (v1 - 9.0).abs() < 0.001,
+            "expected 9.0 after 'l', got {}",
+            v1
+        );
+        // h → back to 8.0
+        app.handle(&key('h'));
+        let v2 = app.remembrance.knobs.get(KnobId::VisionRange);
+        assert!(
+            (v2 - 8.0).abs() < 0.001,
+            "expected 8.0 after 'h', got {}",
+            v2
+        );
+        // clamp: spam 'l' to exceed 15.0 max
+        for _ in 0..20 {
+            app.handle(&key('l'));
+        }
+        let v3 = app.remembrance.knobs.get(KnobId::VisionRange);
+        assert!(v3 <= 15.0, "vision clamped at 15, got {}", v3);
+    }
+
+    #[test]
+    fn r_resets_one_R_resets_all() {
+        let mut app = fresh_app();
+        // Mutate several knobs via direct set
+        app.remembrance.knobs.set(KnobId::VisionRange, 12.0);
+        app.remembrance.knobs.set(KnobId::EnemyHpMul, 2.5);
+        // Open modal at cursor 6 (VisionRange), press 'r' to reset one
+        app.handle(&key('k'));
+        for _ in 0..6 {
+            app.handle(&key('j'));
+        }
+        app.handle(&key('r'));
+        let v = app.remembrance.knobs.get(KnobId::VisionRange);
+        assert!(
+            (v - 8.0).abs() < 0.001,
+            "expected default 8 after 'r', got {}",
+            v
+        );
+        // EnemyHpMul should still be 2.5 (only current knob reset)
+        let e = app.remembrance.knobs.get(KnobId::EnemyHpMul);
+        assert!((e - 2.5).abs() < 0.001, "expected 2.5 unchanged, got {}", e);
+        // Now 'R' resets all
+        app.handle(&key('R'));
+        let e2 = app.remembrance.knobs.get(KnobId::EnemyHpMul);
+        assert!(
+            (e2 - 1.0).abs() < 0.001,
+            "expected default 1.0 after 'R', got {}",
+            e2
+        );
+    }
+
+    #[test]
+    fn wiring_vision_range_threads_into_player_viewshed() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::VisionRange, 12.0);
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, rem, Locale::Korean, 0);
+        let vs = app.world.get::<&Viewshed>(app.player).unwrap();
+        assert_eq!(vs.range, 12, "player Viewshed.range should match knob 12");
+    }
+
+    #[test]
+    fn wiring_enemy_hp_mul_scales_health() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::EnemyHpMul, 2.0);
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, rem, Locale::Korean, 0);
+        let mut found_enemy = false;
+        for (_e, (renderable, health)) in app.world.query::<(&Renderable, &Health)>().iter() {
+            if renderable.glyph == 'r' && !found_enemy {
+                let expected: f32 = (6.0 + 1.0) * 2.0;
+                let actual = health.max as f32;
+                assert!(
+                    (actual - expected).abs() <= 1.5,
+                    "rat HP at hp_mul=2: expected ~{}, got {}",
+                    expected,
+                    actual
+                );
+                found_enemy = true;
+            }
+        }
+        assert!(found_enemy, "expected a rat (r) on floor 1");
+    }
+
+    #[test]
+    fn wiring_enemy_atk_mul_scales_attack_bonus() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::EnemyAtkMul, 2.0);
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, rem, Locale::Korean, 0);
+        let mut found = false;
+        for (_e, (renderable, stats)) in app.world.query::<(&Renderable, &Stats)>().iter() {
+            if renderable.glyph == 'r' && !found {
+                let expected: f32 = 3.0 * 2.0;
+                let actual = stats.strength as f32;
+                assert!(
+                    (actual - expected).abs() <= 1.5,
+                    "rat strength at atk_mul=2: expected ~{}, got {}",
+                    expected,
+                    actual
+                );
+                found = true;
+            }
+        }
+        assert!(found, "expected a rat on floor 1");
+    }
+
+    #[test]
+    fn wiring_monster_density_zero_skips_bear() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::MonsterDensity, 0.0);
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 3, rem, Locale::Korean, 0);
+        let mut bear_count = 0;
+        for (_e, renderable) in app.world.query::<&Renderable>().iter() {
+            if renderable.glyph == 'B' {
+                bear_count += 1;
+            }
+        }
+        assert_eq!(bear_count, 0, "bear should be skipped at density=0");
+    }
+
+    #[test]
+    fn wiring_max_floors_extends_run_past_8() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::MaxFloors, 10.0);
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 8, rem, Locale::Korean, 0);
+        let eff = app.effective_max_floors();
+        assert!(
+            eff >= 10,
+            "effective_max_floors should be >= 10 with knob=10, got {}",
+            eff
+        );
     }
 }

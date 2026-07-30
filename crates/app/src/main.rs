@@ -1,9 +1,14 @@
 //! asciirogue — Korean-first TUI roguelike with half-block visuals.
 
 use anyhow::{Context, Result};
-use asciirogue_combat::{attack, ai};
+use asciirogue::{
+    drop_inventory_at, nearest_pickup_info, nearest_stairs_info, pick_up_outcome, toggle_equip_at,
+    use_inventory_at, ModalMode, PickupOutcome,
+};
+use asciirogue_combat::{ai, attack};
 use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
+    knobs::{KnobId, Knobs},
     meta::SoulRemembrance,
     vision, Ai, AiKind, Direction, EquipSlot, Equipment, FloorTheme, Health, Inventory, Item,
     ItemKind, Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
@@ -11,13 +16,9 @@ use asciirogue_core::{
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::disable_raw_mode;
 use crossterm::execute;
+use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::LeaveAlternateScreen;
-use asciirogue::{
-    drop_inventory_at, nearest_pickup_info, nearest_stairs_info, pick_up_outcome, toggle_equip_at,
-    use_inventory_at, ModalMode, PickupOutcome,
-};
 use hecs::World;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Span;
@@ -90,13 +91,7 @@ const INVENTORY_MAX: usize = 8;
 impl App {
     fn new(base_seed: u64) -> Self {
         let loc = Locale::from_code(&std::env::var("ASCIITROGUE_LANG").unwrap_or_default());
-        Self::new_at_with(
-            base_seed,
-            1,
-            load_remembrance(),
-            loc,
-            0,
-        )
+        Self::new_at_with(base_seed, 1, load_remembrance(), loc, 0)
     }
 
     /// Convenience for tests: a fresh App with no saved meta.
@@ -129,7 +124,17 @@ impl App {
             Position(player_pos),
             Player,
             Renderable::new('@', 0xFF_D6_5A),
-            Viewshed::new(VIEW_RADIUS, MAP_W, MAP_H),
+            // v0.6.0: read vision range knob (memory field with #[serde(default)] → always present).
+            // Fall back to VIEW_RADIUS if the value falls outside the declared knob range.
+            Viewshed::new(
+                {
+                    let raw = remembrance.knobs.get(KnobId::VisionRange).round() as i32;
+                    let (lo, hi) = Knobs::range_of(KnobId::VisionRange);
+                    raw.max(lo as i32).min(hi as i32)
+                },
+                MAP_W,
+                MAP_H,
+            ),
             Health::new(40 + 5 * (floor as i32 - 1)),
             Mana::new(15 + 2 * (floor as i32 - 1)),
             Stats::new(10, 10, 8, 8, 10),
@@ -139,14 +144,16 @@ impl App {
         ));
 
         // Populate monsters and loot scaled by floor.
-        populate_floor(&mut world, &dungeon, floor, theme);
+        populate_floor(&mut world, &dungeon, floor, theme, &remembrance.knobs);
 
         let blocks = build_blocks(&dungeon);
         let boss_defeated = floor > BOSS_FLOOR; // past-boss floors count as cleared
 
         // Compose an opening log line using the active locale.
-        let startup_args: [&dyn std::fmt::Display; 2] =
-            [&floor as &dyn std::fmt::Display, &theme.label() as &dyn std::fmt::Display];
+        let startup_args: [&dyn std::fmt::Display; 2] = [
+            &floor as &dyn std::fmt::Display,
+            &theme.label() as &dyn std::fmt::Display,
+        ];
         let startup_msg = format!(
             "{} — {}",
             t_format_with_locale(I18nKey::MsgFloorEntered, locale, &startup_args),
@@ -181,7 +188,11 @@ impl App {
     }
 
     fn floor_label(&self) -> String {
-        format!("{}F {}", self.floor, FloorTheme::from_depth(self.floor).label())
+        format!(
+            "{}F {}",
+            self.floor,
+            FloorTheme::from_depth(self.floor).label()
+        )
     }
 
     /// v0.5.9: probe-side accessor for tests.
@@ -206,6 +217,11 @@ impl App {
                 // gameplay loop. This means enemies don't move, FOV doesn't
                 // recompute, and the player can't accidentally walk into a
                 // monster while inspecting loot.
+                // v0.6.0: knobs modal owns input while open.
+                if let ModalMode::Knobs { cursor } = self.modal {
+                    self.handle_knobs_key(k.code, cursor);
+                    return;
+                }
                 if let ModalMode::Inventory { cursor } = self.modal {
                     self.handle_inventory_key(k.code, cursor);
                     return;
@@ -388,23 +404,25 @@ impl App {
                         // or full-inventory refusal.
                         let item = Item::potion_hp();
                         let label = format!("{} (+{})", item.name, item.bonus);
-                        let outcome = if let Ok(mut inv) =
-                            self.world.get::<&mut Inventory>(self.player)
-                        {
-                            match inv.push(item) {
-                                Ok(_) => "added".to_string(),
-                                Err(()) => "full".to_string(),
-                            }
-                        } else {
-                            "no_inventory".to_string()
-                        };
+                        let outcome =
+                            if let Ok(mut inv) = self.world.get::<&mut Inventory>(self.player) {
+                                match inv.push(item) {
+                                    Ok(_) => "added".to_string(),
+                                    Err(()) => "full".to_string(),
+                                }
+                            } else {
+                                "no_inventory".to_string()
+                            };
                         match outcome.as_str() {
                             "added" => self.log(format!("[치트] 물약 추가: {}", label)),
                             "full" => self.log("[치트] 인벤토리가 가득 차서 추가 실패"),
                             _ => self.log("[치트] 인벤토리가 없어 추가 실패"),
                         }
                     }
-                    KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
+                    KeyCode::Char('g')
+                    | KeyCode::Char('G')
+                    | KeyCode::Char('$')
+                    | KeyCode::Char(',') => {
                         let mut gold_gained: u32 = 0;
                         match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
                             PickupOutcome::Picked => {
@@ -442,6 +460,10 @@ impl App {
                             .and_then(|inv| inv.slots.iter().position(|s| s.is_some()))
                             .unwrap_or(0);
                         self.modal = ModalMode::Inventory { cursor };
+                    }
+                    KeyCode::Char('k') | KeyCode::Char('K') => {
+                        // v0.6.0: open the 16-knob slider modal.
+                        self.modal = ModalMode::Knobs { cursor: 0 };
                     }
                     KeyCode::Char('p') => {
                         // Quick-potion: use the first available potion in
@@ -483,9 +505,9 @@ impl App {
         // items (loot) have no Health component; if we let them through
         // player_attack returns early on `already_dead` and the stairs
         // modal trigger at the bottom of this function never runs.
-        let target_entity = self.entity_at(next).filter(|&e| {
-            self.world.get::<&Health>(e).is_ok()
-        });
+        let target_entity = self
+            .entity_at(next)
+            .filter(|&e| self.world.get::<&Health>(e).is_ok());
         if let Some(entity) = target_entity {
             self.player_attack(entity);
             self.tick = self.tick.wrapping_add(1);
@@ -554,15 +576,14 @@ impl App {
             self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
             return false;
         }
-        if next_floor > MAX_FLOORS {
+        if next_floor > self.effective_max_floors() {
             self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
             self.log(i18n::t_for(I18nKey::MsgAlreadyAtBottom, self.locale));
             self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
             let _ = save_remembrance(&self.remembrance);
             self.log(format!(
                 "쏠쏠리의 방 클리어! clears={}, soul_wisps={}",
-                self.remembrance.clears,
-                self.remembrance.wisps,
+                self.remembrance.clears, self.remembrance.wisps,
             ));
             return false;
         }
@@ -601,10 +622,14 @@ impl App {
         };
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.modal = ModalMode::Inventory { cursor: next_cursor(cursor, 1) };
+                self.modal = ModalMode::Inventory {
+                    cursor: next_cursor(cursor, 1),
+                };
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.modal = ModalMode::Inventory { cursor: next_cursor(cursor, -1) };
+                self.modal = ModalMode::Inventory {
+                    cursor: next_cursor(cursor, -1),
+                };
             }
             KeyCode::Char('e') => {
                 if let Some(msg) = toggle_equip_at(&mut self.world, self.player, cursor) {
@@ -627,7 +652,11 @@ impl App {
                     .world
                     .get::<&Inventory>(self.player)
                     .ok()
-                    .and_then(|i| i.slots.get(cursor).and_then(|s| s.as_ref().map(|it| it.kind)));
+                    .and_then(|i| {
+                        i.slots
+                            .get(cursor)
+                            .and_then(|s| s.as_ref().map(|it| it.kind))
+                    });
                 match kind {
                     Some(ItemKind::Weapon) | Some(ItemKind::Armor) => {
                         if let Some(msg) = toggle_equip_at(&mut self.world, self.player, cursor) {
@@ -724,13 +753,7 @@ impl App {
             .world
             .query::<&Health>()
             .iter()
-            .filter_map(|(e, h)| {
-                if h.is_dead() {
-                    Some(e)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(e, h)| if h.is_dead() { Some(e) } else { None })
             .collect();
         let mut boss: Option<hecs::Entity> = None;
         for &e in &dead {
@@ -837,8 +860,7 @@ impl App {
             let can_see_player_now = {
                 let dx = (player_pos.0 - enemy_pos.0).abs();
                 let dy = (player_pos.1 - enemy_pos.1).abs();
-                dx.max(dy) <= ai_behav.vision
-                    && los_clear(enemy_pos, player_pos, sight_blocks)
+                dx.max(dy) <= ai_behav.vision && los_clear(enemy_pos, player_pos, sight_blocks)
             };
             // Update last_known_player whenever the enemy sees the player.
             if can_see_player_now {
@@ -856,8 +878,7 @@ impl App {
                 } else {
                     ai_behav.last_known_player
                 },
-                |x, y| is_passable(&self.dungeon, x, y)
-                    && self.entity_at(TilePos(x, y)).is_none(),
+                |x, y| is_passable(&self.dungeon, x, y) && self.entity_at(TilePos(x, y)).is_none(),
                 sight_blocks,
             );
             match action {
@@ -868,9 +889,7 @@ impl App {
                         continue;
                     }
                     let np = TilePos(enemy_pos.0 + dx, enemy_pos.1 + dy);
-                    if is_passable(&self.dungeon, np.0, np.1)
-                        && self.entity_at(np).is_none()
-                    {
+                    if is_passable(&self.dungeon, np.0, np.1) && self.entity_at(np).is_none() {
                         if let Ok(mut p) = self.world.get::<&mut Position>(entity) {
                             p.0 = np;
                         }
@@ -981,11 +1000,7 @@ impl App {
         ) {
             format!(
                 "HP {}/{}  MP {}/{}  G {}",
-                h.current,
-                h.max,
-                m.current,
-                m.max,
-                self.gold
+                h.current, h.max, m.current, m.max, self.gold
             )
         } else {
             format!("?  G {}", self.gold)
@@ -1096,14 +1111,25 @@ impl App {
             let here = (px, py);
             // Four neighbours.
             let neighbours = [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)];
-            for (_, (p, _it)) in self.world.query::<(&asciirogue_core::Position, &Item)>().iter() {
-                let k = (p.0.0, p.0.1);
+            for (_, (p, _it)) in self
+                .world
+                .query::<(&asciirogue_core::Position, &Item)>()
+                .iter()
+            {
+                let k = (p.0 .0, p.0 .1);
                 if k == here || neighbours.contains(&k) {
                     near_pickup_tiles.insert(k);
                 }
             }
         }
-        draw_world(frame, centered, &self.dungeon, &self.world, &viewshed_snapshot, &near_pickup_tiles);
+        draw_world(
+            frame,
+            centered,
+            &self.dungeon,
+            &self.world,
+            &viewshed_snapshot,
+            &near_pickup_tiles,
+        );
 
         // Footer — last few messages + control hint.
         let recent = self
@@ -1141,6 +1167,10 @@ impl App {
         // full frame after the player steps onto the stairs tile.
         if self.modal_redraws > 0 || matches!(self.modal, ModalMode::ConfirmStairs { .. }) {
             self.draw_confirm_stairs_modal(frame, area);
+        }
+        // v0.6.0: knobs slider modal overlay.
+        if let ModalMode::Knobs { cursor } = self.modal {
+            self.draw_knobs_modal(frame, area, cursor);
         }
         // v0.5.27: when the player is dead, the death screen replaces
         // the dungeon map. This gives the summary (floor reached, gold
@@ -1217,7 +1247,9 @@ impl App {
         let is_boss_floor = self.floor == BOSS_FLOOR;
         // Bigger, wider popup: 60% of width. 7 rows on regular floors,
         // 9 on the boss floor (2 borders + 7 inner rows incl. hint).
-        let popup_w = (area.width * 60 / 100).max(36).min(area.width.saturating_sub(2));
+        let popup_w = (area.width * 60 / 100)
+            .max(36)
+            .min(area.width.saturating_sub(2));
         let popup_h = if is_boss_floor {
             9u16.min(area.height.saturating_sub(2))
         } else {
@@ -1239,10 +1271,16 @@ impl App {
         let block = Block::default()
             .title(Span::styled(
                 title_text,
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
@@ -1270,10 +1308,20 @@ impl App {
         // The selected option carries REVERSED + BOLD + accent colour so
         // the player has unambiguous visual feedback. The unselected
         // option stays grey so the focus is clear.
-        let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let yellow = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         let grey = Style::default().fg(Color::Gray);
-        let y_style = if choice { yellow.add_modifier(Modifier::REVERSED) } else { grey };
-        let n_style = if !choice { grey.add_modifier(Modifier::REVERSED) } else { grey };
+        let y_style = if choice {
+            yellow.add_modifier(Modifier::REVERSED)
+        } else {
+            grey
+        };
+        let n_style = if !choice {
+            grey.add_modifier(Modifier::REVERSED)
+        } else {
+            grey
+        };
         let y_cursor = if choice { "▶ " } else { "  " };
         let n_cursor = if !choice { "▶ " } else { "  " };
         let prompt_styled = match self.locale {
@@ -1304,7 +1352,12 @@ impl App {
 
     /// v0.5.7: centered modal with the player's inventory. 8-slot grid on
     /// the left, equipped items on the right, controls hint on the bottom.
-    fn draw_inventory_modal(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect, cursor: usize) {
+    fn draw_inventory_modal(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        cursor: usize,
+    ) {
         use ratatui::layout::{Constraint, Direction, Layout};
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
@@ -1334,7 +1387,7 @@ impl App {
                 Constraint::Length(10), // slot list
                 Constraint::Length(1),  // spacer
                 Constraint::Length(3),  // equipped + stats + gold
-                Constraint::Min(1),    // controls
+                Constraint::Min(1),     // controls
             ])
             .split(inner);
 
@@ -1347,7 +1400,9 @@ impl App {
         let equip = self.world.get::<&Equipment>(self.player).ok().map(|e| *e);
         for i in 0..8usize {
             let slot_area = slot_chunks[i];
-            let item = inv.as_ref().and_then(|inv| inv.slots.get(i).and_then(|s| s.clone()));
+            let item = inv
+                .as_ref()
+                .and_then(|inv| inv.slots.get(i).and_then(|s| s.clone()));
             let tag = match (&item, equip) {
                 (Some(it), Some(eq)) if eq.weapon == Some(i) => "[W]",
                 (Some(it), Some(eq)) if eq.armor == Some(i) => "[A]",
@@ -1403,9 +1458,7 @@ impl App {
             if let Some(s) = stats {
                 lines.push(Line::from(format!(
                     "공격 보너스: {:+}    방어 보너스: {:+}    보유 골드: {}",
-                    s.attack_bonus,
-                    s.defense_bonus,
-                    self.gold
+                    s.attack_bonus, s.defense_bonus, self.gold
                 )));
             } else {
                 lines.push(Line::from(format!("보유 골드: {}", self.gold)));
@@ -1433,6 +1486,153 @@ impl App {
         .wrap(Wrap { trim: true });
         frame.render_widget(ctrl, chunks[3]);
     }
+
+    /// v0.6.0: dispatch one knobs-modal key.
+    fn handle_knobs_key(&mut self, code: KeyCode, cursor: usize) {
+        use asciirogue_core::knobs::{KnobId, Knobs};
+        let knob_count = KnobId::COUNT;
+        let next_cursor = |cur: usize, delta: i32| -> usize {
+            let n = knob_count as i32;
+            let c = cur as i32 + delta;
+            ((c % n + n) % n) as usize
+        };
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.modal = ModalMode::Knobs {
+                    cursor: next_cursor(cursor, 1),
+                };
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.modal = ModalMode::Knobs {
+                    cursor: next_cursor(cursor, -1),
+                };
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if let Some(id) = KnobId::from_index(cursor) {
+                    let v = self.remembrance.knobs.get(id);
+                    let step = Knobs::step_of(id);
+                    self.remembrance.knobs.set_clamped(id, v + step);
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if let Some(id) = KnobId::from_index(cursor) {
+                    let v = self.remembrance.knobs.get(id);
+                    let step = Knobs::step_of(id);
+                    self.remembrance.knobs.set_clamped(id, v - step);
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Some(id) = KnobId::from_index(cursor) {
+                    self.remembrance.knobs.reset_one(id);
+                }
+            }
+            KeyCode::Char('R') => {
+                self.remembrance.knobs.reset();
+            }
+            KeyCode::Esc | KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Char('q') => {
+                self.modal = ModalMode::Closed;
+            }
+            _ => {}
+        }
+    }
+
+    /// v0.6.0: render the 60x18 centered knob slider modal.
+    fn draw_knobs_modal(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        cursor: usize,
+    ) {
+        use ratatui::layout::{Constraint, Direction, Layout, Margin};
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::Span;
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+
+        // Centered 60x18 modal -- matches inventory modal footprint.
+        let w = 60u16.min(area.width);
+        let h = 18u16.min(area.height);
+        let modal_area = ratatui::layout::Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        frame.render_widget(Clear, modal_area);
+
+        let title = match self.locale {
+            Locale::Korean => " 노브 (K/Esc: 닫기) ",
+            Locale::English => " Knobs (K/Esc: close) ",
+        };
+        let block = Block::default().title(title).borders(Borders::ALL);
+        frame.render_widget(block, modal_area);
+        let inner = modal_area.inner(Margin::new(1, 1));
+
+        // 16 knob rows + 1 controls row + 1 spacer = 18
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                std::iter::repeat(Constraint::Length(1))
+                    .take(KnobId::COUNT)
+                    .chain(std::iter::once(Constraint::Min(1))),
+            )
+            .split(inner);
+
+        let cursor_style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        let unwired_style = Style::default().fg(Color::DarkGray);
+        let normal_style = Style::default();
+
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap(); // COUNT is the bound, so always Some
+            let label = Knobs::label_of(id);
+            let value = self.remembrance.knobs.get(id);
+            let (lo, hi) = Knobs::range_of(id);
+            let default = Knobs::default_of(id);
+            let text = format!(
+                "{:>2}. {:<10}  {:>6.2}  (def {:>5.2}, {:>4.2}..{:>4.2})",
+                i + 1,
+                label,
+                value,
+                default,
+                lo,
+                hi,
+            );
+            let style = if i == cursor {
+                cursor_style
+            } else if matches!(
+                id,
+                KnobId::VisionRange
+                    | KnobId::EnemyHpMul
+                    | KnobId::EnemyAtkMul
+                    | KnobId::MonsterDensity
+                    | KnobId::MaxFloors
+            ) {
+                normal_style
+            } else {
+                unwired_style
+            };
+            let p = Paragraph::new(Span::styled(text, style));
+            frame.render_widget(p, chunks[i]);
+        }
+
+        let hint = match self.locale {
+            Locale::Korean => "j/k 이동 · h/l ±스텝 · r 이항목 기본값 · R 전체 기본값 · Esc 닫기",
+            Locale::English => "j/k nav · h/l ±step · r reset one · R reset all · Esc close",
+        };
+        let hint_p = Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray)))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(hint_p, chunks[KnobId::COUNT]);
+    }
+
+    /// v0.6.0: replace the legacy `MAX_FLOORS` const with a knob-driven
+    /// ceiling. Falls back to 8 if the knob is out of range or zero; the
+    /// minimum is 1 (an out-of-range read can clamp down to 0, which we
+    /// never want -- an infinite descent makes no sense).
+    fn effective_max_floors(&self) -> u32 {
+        let raw = self.remembrance.knobs.get(KnobId::MaxFloors);
+        let (lo, hi) = Knobs::range_of(KnobId::MaxFloors);
+        let clamped = raw.max(lo).min(hi).round() as i32;
+        clamped.max(1) as u32
+    }
 }
 
 // ─── i18n helpers ────────────────────────────────────────────────────────────
@@ -1447,11 +1647,7 @@ fn t_format(app: &App, key: I18nKey, args: &[&dyn std::fmt::Display]) -> String 
 
 /// Same as `t_format`, but takes the locale directly. Useful when we need to
 /// format a string before `App` exists (e.g. inside `new_at_with`).
-fn t_format_with_locale(
-    key: I18nKey,
-    locale: Locale,
-    args: &[&dyn std::fmt::Display],
-) -> String {
+fn t_format_with_locale(key: I18nKey, locale: Locale, args: &[&dyn std::fmt::Display]) -> String {
     let raw = i18n::t_for(key, locale);
     let mut out = String::with_capacity(raw.len() + 16);
     let mut arg_idx = 0;
@@ -1514,9 +1710,11 @@ fn spawn_enemy(
     glyph: char,
     name: &str,
     hp: i32,
-    stats: Stats,
+    mut stats: Stats,
     vision: i32,
     kind: AiKind,
+    hp_mul: f32,
+    atk_mul: f32,
 ) {
     if let Some(room) = dungeon.rooms.get(room_idx) {
         // v0.5.12: if the room center is the stairs tile, nudge to a
@@ -1524,7 +1722,16 @@ fn spawn_enemy(
         let (cx, cy) = room.center();
         let (ex, ey) = match dungeon.stairs {
             Some(s) if (s.0, s.1) == (cx, cy) => {
-                let offsets = [(0,1), (1,0), (0,-1), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)];
+                let offsets = [
+                    (0, 1),
+                    (1, 0),
+                    (0, -1),
+                    (-1, 0),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ];
                 offsets
                     .iter()
                     .map(|&(dx, dy)| (cx + dx, cy + dy))
@@ -1538,10 +1745,13 @@ fn spawn_enemy(
             'g' => 0xB4_5A_D2u32, // magenta goblin
             _ => 0xFF_FF_FFu32,
         };
+        let scaled_hp = ((hp as f32) * hp_mul).round().max(1.0) as i32;
+        stats.strength = (((stats.strength as f32) * atk_mul).round().max(0.0)) as i32;
+        stats.attack_bonus = (((stats.attack_bonus as f32) * atk_mul).round().max(0.0)) as i32;
         world.spawn((
             Position(TilePos(ex, ey)),
             Renderable::new(glyph, fg),
-            Health::new(hp),
+            Health::new(scaled_hp),
             stats,
             Ai::new(kind, 100, vision),
             Name(name.to_string()),
@@ -1550,7 +1760,17 @@ fn spawn_enemy(
 }
 
 /// Spawn monsters + loot scaled by floor number (1..=MAX_FLOORS).
-fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: FloorTheme) {
+fn populate_floor(
+    world: &mut World,
+    dungeon: &Dungeon,
+    floor: u32,
+    theme: FloorTheme,
+    knobs: &Knobs,
+) {
+    use asciirogue_core::knobs::KnobId;
+    let hp_mul = knobs.get(KnobId::EnemyHpMul);
+    let atk_mul = knobs.get(KnobId::EnemyAtkMul);
+    let monster_density = knobs.get(KnobId::MonsterDensity);
     // Difficulty scales linearly: HP + attack bonus per floor.
     let scale = floor as i32; // 1..=8
 
@@ -1580,6 +1800,8 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
             Stats::new(3, 8, 1, 1, 5),
             8,
             AiKind::Coward,
+            hp_mul,
+            atk_mul,
         );
         idx += 1;
         // Tier 2: a goblin (or skeleton for catacombs+).
@@ -1607,10 +1829,13 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
             Stats::new(5, 6, 2, 2, 7),
             9,
             AiKind::Chase,
+            hp_mul,
+            atk_mul,
         );
     }
     // Spawn a tougher prowler if floor is mid-tier or beyond (room 3+).
-    if room_count >= 4 && floor >= 3 {
+    // v0.6.0: gate bear spawn on MonsterDensity knob (0 → no bear).
+    if room_count >= 4 && floor >= 3 && monster_density > 0.0 {
         spawn_enemy(
             world,
             dungeon,
@@ -1621,17 +1846,29 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
             Stats::new(9, 4, 1, 1, 12),
             8,
             AiKind::Chase,
+            hp_mul,
+            atk_mul,
         );
     }
 
     // Boss on BOSS_FLOOR. v0.5.12: spawn on a tile adjacent to the stairs
     // so the boss does not occupy the descent itself.
+    // v0.6.0: scale boss HP/attack by EnemyHpMul / EnemyAtkMul knobs.
     if floor == BOSS_FLOOR {
         if let Some(room) = dungeon.rooms.last() {
             let (cx, cy) = room.center();
             let (sx, sy) = dungeon.stairs.map(|p| (p.0, p.1)).unwrap_or((cx, cy));
             let (bx, by) = if (sx, sy) == (cx, cy) {
-                let offsets = [(0,1), (1,0), (0,-1), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)];
+                let offsets = [
+                    (0, 1),
+                    (1, 0),
+                    (0, -1),
+                    (-1, 0),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ];
                 offsets
                     .iter()
                     .map(|&(dx, dy)| (cx + dx, cy + dy))
@@ -1640,11 +1877,16 @@ fn populate_floor(world: &mut World, dungeon: &Dungeon, floor: u32, theme: Floor
             } else {
                 (cx, cy)
             };
+            let boss_hp = (((120 + scale * 8) as f32) * hp_mul).round().max(1.0) as i32;
+            let boss_str = (((12) as f32) * atk_mul).round().max(0.0) as i32;
+            let boss_atk_bonus = (((6) as f32) * atk_mul).round().max(0.0) as i32;
+            let mut boss_stats = Stats::new(boss_str, 8, 6, 6, 16);
+            boss_stats.attack_bonus = boss_atk_bonus;
             world.spawn((
                 Position(TilePos(bx, by)),
                 Renderable::new('D', 0xFF_FF_40),
-                Health::new(120 + scale * 8),
-                Stats::new(12, 8, 6, 6, 16),
+                Health::new(boss_hp),
+                boss_stats,
                 Ai::new(AiKind::Chase, 100, 10),
                 Name("황녀 🐲".into()),
             ));
@@ -1738,7 +1980,7 @@ fn try_pickup(world: &mut World, player: hecs::Entity) -> bool {
     }
     // Free refs before mutating Inventory.
     drop(world.get::<&Health>(player)); // no-op placeholder that runs; ok
-    // Now push into Inventory.
+                                        // Now push into Inventory.
     let mut inv = world.get::<&mut Inventory>(player).ok().unwrap();
     for item in items_to_put {
         if inv.push(item).is_err() {
@@ -1764,9 +2006,10 @@ fn use_first_potion(world: &mut World, player: hecs::Entity) -> Option<String> {
     let mut idx: Option<usize> = None;
     for (i, slot) in inv.slots.iter().enumerate() {
         if let Some(it) = slot {
-            if matches!(it.kind, asciirogue_core::ItemKind::HealthPotion
-                              | asciirogue_core::ItemKind::ManaPotion)
-            {
+            if matches!(
+                it.kind,
+                asciirogue_core::ItemKind::HealthPotion | asciirogue_core::ItemKind::ManaPotion
+            ) {
                 idx = Some(i);
                 break;
             }
@@ -1900,17 +2143,22 @@ fn dump_to_stdout(seed: u64, count: u32) -> Result<()> {
         };
         let blocks = build_blocks(dungeon);
         let mut visible_buf: Vec<TilePos> = Vec::new();
-        vision::compute(player_pos, MAP_W, MAP_H, VIEW_RADIUS, &blocks, &mut visible_buf);
-        let visible_set: std::collections::HashSet<(i32, i32)> = visible_buf
-            .iter()
-            .map(|&TilePos(x, y)| (x, y))
-            .collect();
+        vision::compute(
+            player_pos,
+            MAP_W,
+            MAP_H,
+            VIEW_RADIUS,
+            &blocks,
+            &mut visible_buf,
+        );
+        let visible_set: std::collections::HashSet<(i32, i32)> =
+            visible_buf.iter().map(|&TilePos(x, y)| (x, y)).collect();
 
         // Build an entity lookup including items (rendered as their item glyph).
         let entity_at: std::collections::HashMap<(i32, i32), char> = world
             .query::<(&Position, &Renderable)>()
             .iter()
-            .map(|(_, (p, r))| ((p.0.0, p.0.1), r.glyph))
+            .map(|(_, (p, r))| ((p.0 .0, p.0 .1), r.glyph))
             .collect();
 
         let theme = FloorTheme::from_depth(i);
@@ -2012,7 +2260,8 @@ fn parse_seed(s: &str) -> Result<u64> {
     if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         return u64::from_str_radix(rest, 16).with_context(|| format!("invalid hex seed: {s}"));
     }
-    s.parse::<u64>().with_context(|| format!("invalid decimal seed: {s}"))
+    s.parse::<u64>()
+        .with_context(|| format!("invalid decimal seed: {s}"))
 }
 
 #[cfg(test)]
@@ -2099,7 +2348,12 @@ mod tests {
         // loot in the first room.
         app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(10, 10);
         // Empty the inventory.
-        app.world.get::<&mut Inventory>(app.player).unwrap().slots.iter_mut().for_each(|s| *s = None);
+        app.world
+            .get::<&mut Inventory>(app.player)
+            .unwrap()
+            .slots
+            .iter_mut()
+            .for_each(|s| *s = None);
         let starting_gold = app.gold();
         // Drop gold to the LEFT of the player.
         app.world.spawn((Position(TilePos(9, 10)), Item::gold(3)));
@@ -2136,7 +2390,9 @@ mod tests {
     /// `bonus` field, and unequipping must clear it back to 0.
     #[test]
     fn test_equip_weapon_updates_attack_bonus() {
-        use asciirogue::{equip_inventory_at, recompute_stats_from_equipment, unequip_slot, EquipSlot};
+        use asciirogue::{
+            equip_inventory_at, recompute_stats_from_equipment, unequip_slot, EquipSlot,
+        };
         let mut app = App::new(0);
         // Teleport player and clear inventory.
         app.world.get::<&mut Position>(app.player).unwrap().0 = TilePos(20, 20);
@@ -2179,9 +2435,21 @@ mod tests {
         inv.slots.iter_mut().for_each(|s| *s = None);
         drop(inv);
         // Place armor at slot 0, two weapons at slots 1 and 2.
-        app.world.get::<&mut Inventory>(app.player).unwrap().put_at(0, Item::armor(3, "가죽갑옷")).unwrap();
-        app.world.get::<&mut Inventory>(app.player).unwrap().put_at(1, Item::weapon(4, "단검")).unwrap();
-        app.world.get::<&mut Inventory>(app.player).unwrap().put_at(2, Item::weapon(7, "도끼")).unwrap();
+        app.world
+            .get::<&mut Inventory>(app.player)
+            .unwrap()
+            .put_at(0, Item::armor(3, "가죽갑옷"))
+            .unwrap();
+        app.world
+            .get::<&mut Inventory>(app.player)
+            .unwrap()
+            .put_at(1, Item::weapon(4, "단검"))
+            .unwrap();
+        app.world
+            .get::<&mut Inventory>(app.player)
+            .unwrap()
+            .put_at(2, Item::weapon(7, "도끼"))
+            .unwrap();
         // Equip armor + first weapon.
         equip_inventory_at(&mut app.world, app.player, 0).unwrap();
         equip_inventory_at(&mut app.world, app.player, 1).unwrap();
@@ -2194,12 +2462,22 @@ mod tests {
         equip_inventory_at(&mut app.world, app.player, 2).unwrap();
         let s = app.world.get::<&Stats>(app.player).unwrap();
         assert_eq!(s.attack_bonus, 7, "new weapon must take effect");
-        assert_eq!(s.defense_bonus, 3, "armor must NOT be touched by weapon swap");
+        assert_eq!(
+            s.defense_bonus, 3,
+            "armor must NOT be touched by weapon swap"
+        );
         drop(s);
         // Inventory should still contain the swapped-out dagger somewhere.
         let inv = app.world.get::<&Inventory>(app.player).unwrap();
-        let dagger_count = inv.slots.iter().filter(|s| s.as_ref().map_or(false, |i| i.name == "단검")).count();
-        assert_eq!(dagger_count, 1, "swapped-out dagger must remain in inventory");
+        let dagger_count = inv
+            .slots
+            .iter()
+            .filter(|s| s.as_ref().map_or(false, |i| i.name == "단검"))
+            .count();
+        assert_eq!(
+            dagger_count, 1,
+            "swapped-out dagger must remain in inventory"
+        );
         // Weapon slot should reference slot 2 (the axe).
         let eq = app.world.get::<&Equipment>(app.player).unwrap();
         assert_eq!(eq.weapon, Some(2));
@@ -2236,7 +2514,11 @@ mod tests {
         inv.put_at(0, Item::gold(99)).unwrap();
         drop(inv);
         let msg = drop_inventory_at(&mut app.world, app.player, 0).unwrap();
-        assert!(msg.contains("내려놓"), "drop msg should be confirmative: {}", msg);
+        assert!(
+            msg.contains("내려놓"),
+            "drop msg should be confirmative: {}",
+            msg
+        );
         // Inventory slot 0 is now empty.
         let inv = app.world.get::<&Inventory>(app.player).unwrap();
         assert!(inv.slots[0].is_none());
@@ -2352,15 +2634,30 @@ mod tests {
         assert_eq!(key_to_direction(&KeyCode::Char('h')), Some(Direction::Left));
         assert_eq!(key_to_direction(&KeyCode::Char('j')), Some(Direction::Down));
         assert_eq!(key_to_direction(&KeyCode::Char('k')), Some(Direction::Up));
-        assert_eq!(key_to_direction(&KeyCode::Char('l')), Some(Direction::Right));
+        assert_eq!(
+            key_to_direction(&KeyCode::Char('l')),
+            Some(Direction::Right)
+        );
     }
 
     #[test]
     fn yubn_diagonals() {
-        assert_eq!(key_to_direction(&KeyCode::Char('y')), Some(Direction::UpLeft));
-        assert_eq!(key_to_direction(&KeyCode::Char('u')), Some(Direction::UpRight));
-        assert_eq!(key_to_direction(&KeyCode::Char('b')), Some(Direction::DownLeft));
-        assert_eq!(key_to_direction(&KeyCode::Char('n')), Some(Direction::DownRight));
+        assert_eq!(
+            key_to_direction(&KeyCode::Char('y')),
+            Some(Direction::UpLeft)
+        );
+        assert_eq!(
+            key_to_direction(&KeyCode::Char('u')),
+            Some(Direction::UpRight)
+        );
+        assert_eq!(
+            key_to_direction(&KeyCode::Char('b')),
+            Some(Direction::DownLeft)
+        );
+        assert_eq!(
+            key_to_direction(&KeyCode::Char('n')),
+            Some(Direction::DownRight)
+        );
     }
 
     #[test]
@@ -2439,7 +2736,10 @@ mod tests {
             "precondition: starting tile must be Floor, got {:?}",
             app.dungeon.at(start.0, start.1)
         );
-        assert!(matches!(app.modal, ModalMode::Closed), "modal must start Closed");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "modal must start Closed"
+        );
 
         let pos_before = app.world.get::<&Position>(app.player).unwrap().0;
         eprintln!(
@@ -2468,7 +2768,9 @@ mod tests {
             matches!(app.modal, ModalMode::ConfirmStairs { .. }),
             "after walking onto StairsDown, modal must be ConfirmStairs \
              (got {:?}). Player moved {:?} -> {:?}.",
-            app.modal, pos_before, pos_after,
+            app.modal,
+            pos_before,
+            pos_after,
         );
         assert!(
             app.at_stairs,
@@ -2521,30 +2823,42 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
-            "precondition: modal must be open after walking onto stairs");
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "precondition: modal must be open after walking onto stairs"
+        );
 
         // Now press y. THIS is what the user reports as broken.
         let pos_before_y = app.world.get::<&Position>(app.player).unwrap().0;
-        eprintln!("[diag] before y: floor={} pos={:?} modal={:?}",
-            app.floor, pos_before_y, app.modal);
+        eprintln!(
+            "[diag] before y: floor={} pos={:?} modal={:?}",
+            app.floor, pos_before_y, app.modal
+        );
         app.handle(&Event::Key(KeyEvent {
             code: KeyCode::Char('y'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        eprintln!("[diag] after y: floor={} pos={:?} modal={:?}",
+        eprintln!(
+            "[diag] after y: floor={} pos={:?} modal={:?}",
             app.floor,
             app.world.get::<&Position>(app.player).unwrap().0,
-            app.modal);
+            app.modal
+        );
 
-        assert!(matches!(app.modal, ModalMode::Closed),
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
             "v0.5.21: pressing y in ConfirmStairs modal must close it (got {:?})",
-            app.modal);
-        assert_eq!(app.floor, start_floor + 1,
+            app.modal
+        );
+        assert_eq!(
+            app.floor,
+            start_floor + 1,
             "v0.5.21: pressing y must descend to next floor (was {}, now {})",
-            start_floor, app.floor);
+            start_floor,
+            app.floor
+        );
     }
 
     /// v0.5.21: n in modal must close without descending.
@@ -2576,11 +2890,16 @@ mod tests {
             state: crossterm::event::KeyEventState::NONE,
         }));
 
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "v0.5.21: pressing n must close the modal (got {:?})", app.modal);
-        assert_eq!(app.floor, start_floor,
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "v0.5.21: pressing n must close the modal (got {:?})",
+            app.modal
+        );
+        assert_eq!(
+            app.floor, start_floor,
             "v0.5.21: pressing n must NOT descend (was {}, now {})",
-            start_floor, app.floor);
+            start_floor, app.floor
+        );
     }
 
     // ─── v0.5.21: selection-state UX ─────────────────────────────────────
@@ -2612,7 +2931,11 @@ mod tests {
         }));
         match app.modal {
             ModalMode::ConfirmStairs { choice } => {
-                assert!(choice, "modal must open with yes selected by default (got choice={})", choice);
+                assert!(
+                    choice,
+                    "modal must open with yes selected by default (got choice={})",
+                    choice
+                );
             }
             other => panic!("expected ConfirmStairs, got {:?}", other),
         }
@@ -2640,7 +2963,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: true }
+        ));
 
         app.handle(&Event::Key(KeyEvent {
             code: KeyCode::Down,
@@ -2648,8 +2974,11 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }),
-            "Down arrow must move selection to no (got {:?})", app.modal);
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { choice: false }),
+            "Down arrow must move selection to no (got {:?})",
+            app.modal
+        );
     }
 
     /// Arrow Up moves the cursor back up to "yes / descend".
@@ -2677,7 +3006,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: false }
+        ));
 
         app.handle(&Event::Key(KeyEvent {
             code: KeyCode::Up,
@@ -2685,8 +3017,11 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }),
-            "Up arrow must move selection back to yes (got {:?})", app.modal);
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { choice: true }),
+            "Up arrow must move selection back to yes (got {:?})",
+            app.modal
+        );
     }
 
     /// Enter with yes selected must descend.
@@ -2715,11 +3050,17 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert_eq!(app.floor, start_floor + 1,
+        assert_eq!(
+            app.floor,
+            start_floor + 1,
             "Enter with yes selected must descend (was {}, now {})",
-            start_floor, app.floor);
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "Enter must close the modal");
+            start_floor,
+            app.floor
+        );
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "Enter must close the modal"
+        );
     }
 
     /// Enter with no selected must cancel without descending.
@@ -2748,7 +3089,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: false }
+        ));
 
         app.handle(&Event::Key(KeyEvent {
             code: KeyCode::Enter,
@@ -2756,9 +3100,11 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert_eq!(app.floor, start_floor,
+        assert_eq!(
+            app.floor, start_floor,
             "Enter with no selected must NOT descend (was {}, now {})",
-            start_floor, app.floor);
+            start_floor, app.floor
+        );
         assert!(matches!(app.modal, ModalMode::Closed));
     }
 
@@ -2776,7 +3122,10 @@ mod tests {
     fn cannot_descend_from_boss_floor_without_defeating_boss() {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
         let start_floor = app.floor;
-        assert_eq!(start_floor, BOSS_FLOOR, "precondition: we are on the boss floor");
+        assert_eq!(
+            start_floor, BOSS_FLOOR,
+            "precondition: we are on the boss floor"
+        );
         assert!(!app.boss_defeated, "precondition: boss is not yet defeated");
 
         // Walk to stairs — modal pops.
@@ -2795,7 +3144,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: true }
+        ));
 
         // Press y — must NOT descend because boss is still alive.
         app.handle(&Event::Key(KeyEvent {
@@ -2841,7 +3193,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: true }
+        ));
 
         // Press y — boss gate triggers.
         app.handle(&Event::Key(KeyEvent {
@@ -2895,8 +3250,10 @@ mod tests {
             state: crossterm::event::KeyEventState::NONE,
         }));
 
-        assert!(matches!(app.modal, ModalMode::Closed),
-            "v0.5.23: n must cancel the modal even when boss gate is active");
+        assert!(
+            matches!(app.modal, ModalMode::Closed),
+            "v0.5.23: n must cancel the modal even when boss gate is active"
+        );
     }
 
     /// Enter with the cursor on "yes" must also be blocked on the boss
@@ -2933,8 +3290,10 @@ mod tests {
             app.floor, start_floor,
             "v0.5.23: pressing Enter on boss floor without defeating boss must NOT descend"
         );
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
-            "v0.5.23: Enter must also keep the modal open on boss-gate rejection");
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "v0.5.23: Enter must also keep the modal open on boss-gate rejection"
+        );
     }
 
     // ─── v0.5.24: boss floor modal hint ──────────────────────────────────────────
@@ -2995,7 +3354,10 @@ mod tests {
              in-place reason for the rejection. Render:\n{}",
             rendered
                 .lines()
-                .filter(|l| l.contains("내려") || l.contains("예") || l.contains("취") || l.contains("보"))
+                .filter(|l| l.contains("내려")
+                    || l.contains("예")
+                    || l.contains("취")
+                    || l.contains("보"))
                 .collect::<Vec<_>>()
                 .join("\n")
         );
@@ -3391,7 +3753,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: true }
+        ));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3403,17 +3768,24 @@ mod tests {
             for x in 0..buf.area.width {
                 let cell = &buf[(x, y)];
                 if cell.symbol() == "예"
-                    && cell.style().add_modifier.contains(ratatui::style::Modifier::REVERSED)
+                    && cell
+                        .style()
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
                 {
                     found_yes_cell_with_reverse = true;
                     break;
                 }
             }
-            if found_yes_cell_with_reverse { break; }
+            if found_yes_cell_with_reverse {
+                break;
+            }
         }
-        assert!(found_yes_cell_with_reverse,
+        assert!(
+            found_yes_cell_with_reverse,
             "selected yes option '예' must render with REVERSED style — \
-             user has no visual feedback for which option is active");
+             user has no visual feedback for which option is active"
+        );
 
         app.handle(&Event::Key(KeyEvent {
             code: KeyCode::Down,
@@ -3421,7 +3793,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         }));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }));
+        assert!(matches!(
+            app.modal,
+            ModalMode::ConfirmStairs { choice: false }
+        ));
 
         let backend2 = TestBackend::new(80, 24);
         let mut terminal2 = Terminal::new(backend2).unwrap();
@@ -3432,16 +3807,23 @@ mod tests {
             for x in 0..buf2.area.width {
                 let cell = &buf2[(x, y)];
                 if cell.symbol() == "취"
-                    && cell.style().add_modifier.contains(ratatui::style::Modifier::REVERSED)
+                    && cell
+                        .style()
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
                 {
                     found_cancel_cell_with_reverse = true;
                     break;
                 }
             }
-            if found_cancel_cell_with_reverse { break; }
+            if found_cancel_cell_with_reverse {
+                break;
+            }
         }
-        assert!(found_cancel_cell_with_reverse,
-            "selected '취소' option must render with REVERSED style after navigation");
+        assert!(
+            found_cancel_cell_with_reverse,
+            "selected '취소' option must render with REVERSED style after navigation"
+        );
     }
 
     // ─── v0.5.28: enemy-attack death path ────────────────────────────────────────

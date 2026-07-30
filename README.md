@@ -75,6 +75,7 @@ asciirogue/
 | `g` | 아이템 줍기 |
 | `i` | 인벤토리 모달 열기 (장착/해제/사용/버리기) |
 | `p` | 빠른 포션 사용 (HP/MP 회복) |
+| `k` / `K` | **노브 슬라이더 모달** (SPEC §20 — 16개 슬라이더로 게임 룰 미세 조정; v0.6.0+) |
 | `y` / `n` | **계단 팝업**: 내려가기 / 취소 (v0.5.11: `>` 단축키 제거) |
 | `c` | 시야 기억 초기화 (FOV 리셋) |
 | `S` | 메타 진행(영혼 기억) 디스크 저장 |
@@ -92,6 +93,34 @@ asciirogue/
 | 보스 격파 | `{0}층 보스 격파! '>' 내려가기.` | `Boss defeated on F{0}! ...` |
 | 사망 | `쓰러졌습니다… (R 새 게임)` | `You died…` |
 | 저장 | `영혼 기억 저장: N 회 클리어` | (현재 한국어 한 줄) |
+
+---
+
+## 🎛️ 노브 슬라이더 (SPEC §20)
+
+게임 중 `k` / `K` 키로 16개 슬라이더 모달을 열어 게임 룰을 미세 조정할 수 있습니다.
+
+| 키 (모달 내) | 동작 |
+|---|---|
+| `j` / `↓` | 다음 슬라이더 |
+| `k` / `↑` | 이전 슬라이더 |
+| `h` / `←` | 값 -스텝 |
+| `l` / `→` | 값 +스텝 |
+| `r` | 현재 슬라이더 기본값으로 리셋 |
+| `R` | 전체 슬라이더 기본값으로 리셋 |
+| `Esc` / `q` / `k` / `K` | 모달 닫기 |
+
+v0.6.0에서 **5개 슬라이더**가 실제 게임 룰에 반영됩니다 (나머지 11개는 UI 표시만, v0.6.1부터 활성화):
+
+- **`vision.range` (시야)** — 플레이어 Viewshed::new의 range에 적용
+- **`enemy.hp_mul` (적 HP)** — 적 Health::new 값에 곱
+- **`enemy.atk_mul` (적 공격)** — 적 Stats.attack_bonus 및 strength에 곱
+- **`monster.density` (적 밀도)** — 값 `0` 일 때 중간 등급 적(곰) 스폰 생략
+- **`max_floors` (최대 층)** — descend_internal 임계값을 기본 8에서 사용자가 늘릴 수 있게
+
+나머지 11개 (hp.start, mp.start, food.start, enemy.speed_mul, scaling.floor, autopilot.mode, autopilot.speed, pacing.recovery, relic.density, gold.density, trap.density)는 슬라이더가 표시되고 조작도 가능하지만 v0.6.0에서는 게임에 반영되지 않으며, v0.6.1에서 연동됩니다.
+
+설정은 `SoulRemembrance.knobs` (RON, `#[serde(default)]`)에 자동 저장되어 다음 런에도 유지됩니다. 자세한 내용은 [`docs/SPEC.md`](docs/SPEC.md) §20 참고.
 
 ---
 

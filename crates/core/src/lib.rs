@@ -4,6 +4,7 @@
 #![deny(rust_2018_idioms)]
 
 pub mod i18n;
+pub mod knobs;
 pub mod meta;
 pub mod vision;
 
@@ -32,14 +33,14 @@ impl TilePos {
 ///   y = (-1, -1) u = (1, -1) b = (-1, 1)  n = (1, 1)
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Direction {
-    Up,      // k
-    Down,    // j
-    Left,    // h
-    Right,   // l
-    UpLeft,  // y
-    UpRight, // u
-    DownLeft,// b
-    DownRight,// n
+    Up,        // k
+    Down,      // j
+    Left,      // h
+    Right,     // l
+    UpLeft,    // y
+    UpRight,   // u
+    DownLeft,  // b
+    DownRight, // n
     None,
 }
 
@@ -57,15 +58,15 @@ impl Direction {
 
     pub fn delta(self) -> (i32, i32) {
         match self {
-            Direction::Up       => ( 0, -1),
-            Direction::Down     => ( 0,  1),
-            Direction::Left     => (-1,  0),
-            Direction::Right    => ( 1,  0),
-            Direction::UpLeft   => (-1, -1),
-            Direction::UpRight  => ( 1, -1),
-            Direction::DownLeft => (-1,  1),
-            Direction::DownRight=> ( 1,  1),
-            Direction::None     => ( 0,  0),
+            Direction::Up => (0, -1),
+            Direction::Down => (0, 1),
+            Direction::Left => (-1, 0),
+            Direction::Right => (1, 0),
+            Direction::UpLeft => (-1, -1),
+            Direction::UpRight => (1, -1),
+            Direction::DownLeft => (-1, 1),
+            Direction::DownRight => (1, 1),
+            Direction::None => (0, 0),
         }
     }
 }
@@ -209,6 +210,16 @@ impl Stats {
             defense_bonus: 0,
         }
     }
+
+    /// Builder-style setter for `attack_bonus`. Returns the modified value so
+    /// the call site reads `Stats::new(...).with_attack_bonus(2)` instead of
+    /// mutating a local first. Used by `populate_floor` to thread the base
+    /// attack through `spawn_enemy`, where it is then scaled by
+    /// `knobs.enemy_atk_mul`.
+    pub const fn with_attack_bonus(mut self, b: i32) -> Self {
+        self.attack_bonus = b;
+        self
+    }
 }
 
 impl Energy {
@@ -301,19 +312,49 @@ pub struct Item {
 
 impl Item {
     pub fn gold(n: i32) -> Self {
-        Self { kind: ItemKind::Coin, name: format!("금화 {}", n), glyph: '$', fg_rgb: 0xFF_D2_46, bonus: n }
+        Self {
+            kind: ItemKind::Coin,
+            name: format!("금화 {}", n),
+            glyph: '$',
+            fg_rgb: 0xFF_D2_46,
+            bonus: n,
+        }
     }
     pub fn potion_hp() -> Self {
-        Self { kind: ItemKind::HealthPotion, name: "치유 물약".into(), glyph: '!', fg_rgb: 0x5A_DC_A0, bonus: 15 }
+        Self {
+            kind: ItemKind::HealthPotion,
+            name: "치유 물약".into(),
+            glyph: '!',
+            fg_rgb: 0x5A_DC_A0,
+            bonus: 15,
+        }
     }
     pub fn potion_mp() -> Self {
-        Self { kind: ItemKind::ManaPotion, name: "마나 물약".into(), glyph: '?', fg_rgb: 0x5A_9C_F0, bonus: 10 }
+        Self {
+            kind: ItemKind::ManaPotion,
+            name: "마나 물약".into(),
+            glyph: '?',
+            fg_rgb: 0x5A_9C_F0,
+            bonus: 10,
+        }
     }
     pub fn weapon(b: i32, name: &str) -> Self {
-        Self { kind: ItemKind::Weapon, name: name.into(), glyph: ')', fg_rgb: 0xC8_C8_C8, bonus: b }
+        Self {
+            kind: ItemKind::Weapon,
+            name: name.into(),
+            glyph: ')',
+            fg_rgb: 0xC8_C8_C8,
+            bonus: b,
+        }
     }
     pub fn armor(b: i32, name: &str) -> Self {
-        Self { kind: ItemKind::Armor, name: name.into(), glyph: '[', fg_rgb: 0xB8_B8_BC, bonus: b }
+        Self {
+            kind: ItemKind::Armor,
+            name: name.into(),
+            glyph: '[',
+            fg_rgb: 0xB8_B8_BC,
+            bonus: b,
+        }
     }
 }
 
@@ -325,7 +366,10 @@ pub struct Inventory {
 }
 impl Inventory {
     pub fn new(max: usize) -> Self {
-        Self { slots: vec![None; max], max }
+        Self {
+            slots: vec![None; max],
+            max,
+        }
     }
     /// Returns Ok(idx) on insert, Err(()) if full.
     pub fn push(&mut self, item: Item) -> Result<usize, ()> {
@@ -377,7 +421,10 @@ pub struct Equipment {
 }
 impl Equipment {
     pub const fn new() -> Self {
-        Self { weapon: None, armor: None }
+        Self {
+            weapon: None,
+            armor: None,
+        }
     }
 
     /// Slot of the equipped item, if the given item is currently worn.
@@ -411,14 +458,14 @@ impl EquipSlot {
 /// Per-floor theme (SPEC §7 — 1~28층 환경).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FloorTheme {
-    Cave,        // 1-4
-    Catacomb,    // 5-8
-    Garden,      // 9-12
-    Library,     // 13-16
-    Forge,       // 17-20
-    Temple,      // 21-24
-    FinalMaw,    // 25-27
-    Boss,        // 28
+    Cave,     // 1-4
+    Catacomb, // 5-8
+    Garden,   // 9-12
+    Library,  // 13-16
+    Forge,    // 17-20
+    Temple,   // 21-24
+    FinalMaw, // 25-27
+    Boss,     // 28
 }
 
 impl FloorTheme {

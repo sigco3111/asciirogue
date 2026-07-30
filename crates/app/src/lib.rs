@@ -795,6 +795,23 @@ impl App {
                 ai::AiAction::Wait | ai::AiAction::Idle => {}
             }
         }
+        // v0.5.28: after every enemy has had a chance to act,
+        // check whether the player's HP dropped to zero. The
+        // v0.5.25 death check lived inside `despawn_dead` —
+        // but `despawn_dead` is only called from `player_attack`
+        // (after the player kills an enemy), not from
+        // `enemy_attack`. Walking into an enemy and dying
+        // from the counter-attack therefore never triggered
+        // `game_over`. Fix the path so any HP=0 transition
+        // fires on_player_death exactly once.
+        let player_dead = self
+            .world
+            .get::<&Health>(self.player)
+            .map(|h| h.is_dead())
+            .unwrap_or(false);
+        if player_dead {
+            self.on_player_death();
+        }
     }
 
     pub fn enemy_attack(&mut self, attacker: hecs::Entity) {

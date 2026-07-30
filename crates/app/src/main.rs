@@ -879,6 +879,23 @@ impl App {
                 ai::AiAction::Wait | ai::AiAction::Idle => {}
             }
         }
+        // v0.5.28: after every enemy has had a chance to act,
+        // check whether the player's HP dropped to zero. The
+        // v0.5.25 death check lived inside `despawn_dead` —
+        // but `despawn_dead` is only called from `player_attack`
+        // (after the player kills an enemy), not from
+        // `enemy_attack`. Walking into an enemy and dying
+        // from the counter-attack therefore never triggered
+        // `game_over`. Fix the path so any HP=0 transition
+        // fires on_player_death exactly once.
+        let player_dead = self
+            .world
+            .get::<&Health>(self.player)
+            .map(|h| h.is_dead())
+            .unwrap_or(false);
+        if player_dead {
+            self.on_player_death();
+        }
     }
 
     fn enemy_attack(&mut self, attacker: hecs::Entity) {
@@ -3427,6 +3444,79 @@ mod tests {
             "selected '취소' option must render with REVERSED style after navigation");
     }
 
+    // ─── v0.5.28: enemy-attack death path ────────────────────────────────────────
+    //
+    // The v0.5.25 death check lived inside `despawn_dead`, which is
+    // called from `player_attack` (after the player kills an enemy)
+    // — but NOT from `enemy_attack`. So when the player walks into
+    // an enemy and the counter-attack drops HP to 0, the death
+    // handler never fires — game_over stays false and the screen
+    // shows the normal dungeon with the player stuck at HP=0.
+    // v0.5.28 moves the death check to the end of `enemy_take_turns`
+    // so any HP=0 transition triggers `on_player_death`.
+
+    /// v0.5.28 regression: when `enemy_attack` drops the player to
+    /// HP 0, the next `enemy_take_turns` MUST set game_over=true.
+    /// Previously the death check was unreachable because the only
+    /// call site was inside `despawn_dead` (only triggered when the
+    /// PLAYER kills an enemy, never when the enemy kills the player).
+    #[test]
+    fn enemy_attack_death_triggers_game_over() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        // Put the player at 1 HP — one enemy hit is lethal.
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 1;
+        }
+        assert!(!app.game_over, "precondition: game starts alive");
+
+        // Spawn an enemy right next to the player so the next
+        // enemy_take_turns iteration will see and attack them.
+        let player_pos = app.world.get::<&Position>(app.player).unwrap().0;
+        let enemy_pos = TilePos(player_pos.0 + 1, player_pos.1);
+        app.world.spawn((
+            Position(enemy_pos),
+            Health::new(20),
+            Stats::new(5, 5, 5, 5, 5),
+            Ai::new(AiKind::Chase, 10, 10),
+            Renderable::new('g', 0xFF0000),
+            Name("테스트 적".into()),
+        ));
+
+        // Mark the enemy's last_known_player so it doesn't waste a
+        // turn wandering — go straight for AttackPlayer.
+        let enemy_e = app
+            .world
+            .query::<&Ai>()
+            .iter()
+            .next()
+            .map(|(e, _)| e)
+            .expect("enemy spawned");
+        if let Ok(mut ai) = app.world.get::<&mut Ai>(enemy_e) {
+            ai.last_known_player = Some(player_pos);
+        }
+
+        // Now drain HP to 0 — simulating the lethal counter-attack.
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 0;
+        }
+
+        // Run enemy_take_turns. The death check at the end (v0.5.28)
+        // must fire.
+        app.enemy_take_turns();
+
+        assert!(
+            app.game_over,
+            "v0.5.28: enemy attack that drops HP to 0 MUST set game_over=true. \
+             game_over stayed false — death handler never fired. \
+             This was the v0.5.25 bug: the death check lived inside \
+             despawn_dead which is only called when the PLAYER attacks."
+        );
+        assert!(
+            app.messages.iter().any(|m| m.contains("쓰러졌")),
+            "v0.5.28: death summary '쓰러졌습니다' must be in messages"
+        );
+    }
+
     /// v0.5.20 surface proof: after walking onto StairsDown, the modal
     /// actually renders to screen (not just the state machine). Drives
     /// `App::draw` through ratatui's TestBackend and reads the buffer.
@@ -3434,9 +3524,6 @@ mod tests {
     #[test]
     fn walking_onto_stairs_renders_modal_to_screen() {
         use ratatui::backend::TestBackend;
-        use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::Span;
-        use ratatui::widgets::{Block, Borders, Paragraph};
         use ratatui::Terminal;
 
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);

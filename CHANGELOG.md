@@ -5,7 +5,28 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.27 — Death screen overlay
+### v0.5.28 — Fix: enemy-attack death path
+
+The v0.5.25 death handler never actually fired in real gameplay.
+The death check lived inside `despawn_dead`, which is only called
+from `player_attack` (after the player kills an enemy) — never
+from `enemy_attack`. So when the player walks into an enemy and
+the counter-attack drops HP to 0, `game_over` stays `false` and
+the screen shows the normal dungeon with the player stuck at HP=0.
+v0.5.27 added the death overlay but the gate never opened.
+
+v0.5.28 moves the death check to the end of `enemy_take_turns`,
+the natural moment when all enemies have finished acting. Any
+HP=0 transition now triggers `on_player_death` exactly once
+(the existing idempotency check in `on_player_death` handles
+the rare double-fire if both player-attack and enemy-attack
+kill the player in the same tick).
+
+Test totals: 106 pass / 0 fail (was 105 pass / 0 fail; added
+`enemy_attack_death_triggers_game_over` regression test in
+`crates/app/src/main.rs`).
+
+## v0.5.27 — Death screen overlay
 
 The v0.5.25 death handler pushed summary messages but they were
 buried in the footer log (which only shows the last 2 messages).

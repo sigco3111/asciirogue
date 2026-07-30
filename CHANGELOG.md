@@ -5,6 +5,123 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
+### v0.5.22 — Stairs modal: vertical navigation (Up/Down)
+
+v0.5.21 added horizontal navigation (Left/Right) but the modal lays
+out its two options vertically — `[y] 예` on row 1, `[n] 취소` on
+row 2. Vertical arrows match the layout. Hotkeys `k`/`j` mirror the
+game's existing `hjkl` movement convention.
+
+| Key | Action |
+|---|---|
+| `↓` / `j` | Move cursor DOWN to "no / cancel" |
+| `↑` / `k` | Move cursor UP to "yes / descend" |
+| `Tab` | Toggle selection |
+| `Enter` | Confirm current selection |
+| `y` / `Y` | Direct hotkey: descend |
+| `n` / `N` / `Esc` | Direct hotkey: cancel |
+
+No test count change — the existing selection-state tests were
+retargeted at the new keys (`arrow_up_moves_selection_to_yes`,
+`arrow_down_moves_selection_to_no`) instead of being added.
+
+## v0.5.21 — Stairs modal: visual selection state + arrow navigation
+
+The v0.5.20 modal worked but had no visual feedback for which option
+would be confirmed. Players had to guess which key to press. This
+release adds a real selection UX:
+
+- **Visual cursor `▶`** on the currently-selected option.
+- **REVERSED style** on the selected option for unmistakable
+  emphasis.
+- **Arrow Left/Right** (and `h`/`l`) move the cursor between options.
+- **Tab** toggles the selection.
+- **Enter** confirms the currently-selected option.
+- **y/Y** still descend directly; **n/N/Esc** still cancel directly.
+- **Default selection is "yes / descend"** — the player walked to
+  the stairs on purpose, descending is the natural choice; they
+  navigate left to back out.
+
+**Implementation.** `ModalMode::ConfirmStairs` is now
+`ModalMode::ConfirmStairs { choice: bool }`. The `choice` field
+carries the current selection. Modal triggers set it to `true`;
+the handler rewrites it on navigation; the draw function reads it
+to render the cursor + REVERSED style. Direct hotkeys (`y`/`n`)
+close the modal without touching `choice`; Enter acts on the
+current `choice`.
+
+**Modal layout** (Korean locale):
+
+```
+┌▼ 내려가기 확인───────────────────────────────────────────┐
+│                                                          │
+│▼ 다음 층으로 내려갈까?  [Y]                              │
+│                                                          │
+│  ▶ [y] 예 — 다음 층으로                                  │   ← selected: REVERSED + ▶
+│    [n] 취소 — 머무름                                     │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+Test totals: 92 pass / 0 fail (was 84 pass / 0 fail after v0.5.20;
+added 8 selection-state regression tests in `crates/app/src/main.rs`).
+
+## v0.5.20 — Stairs arrival modal: actual root-cause fix
+
+**The bug.** Walking onto a `▼` tile never triggered the descent
+confirmation modal. Nine patch versions (v0.5.11 → v0.5.19) tried to
+fix this in `try_player_act`, the modal handler, the redraw counter,
+recovery UX, the loot-on-stairs filter — every fix landed in the wrong
+file. The bug was one layer up: `is_passable` in the binary's copy
+of the helper did not include `Tile::StairsDown`, so `try_player_act`
+returned at the wall-check before reaching the modal trigger. The
+`~` debug warp bypasses `is_passable`, which is why the modal
+handler looked like it worked.
+
+**Root cause.** `crates/app/src/main.rs` is the binary (`cargo run`
+uses `path = "src/main.rs"` per `Cargo.toml`). All v0.5.11–v0.5.19
+patches landed in `crates/app/src/lib.rs`. The two files were forked
+during the v0.5.3 `lib + bin` refactor and drifted apart. `lib.rs`
+correctly matches `Floor | StairsDown`; `main.rs` only matched
+`Floor`. The StairsDown variant was added in v0.5.10, and main.rs
+never got the update.
+
+**Fix.** One line in `crates/app/src/main.rs`:
+
+```rust
+fn is_passable(d: &Dungeon, x: i32, y: i32) -> bool {
+    matches!(d.at(x, y), Tile::Floor | Tile::StairsDown) // was: Tile::Floor
+}
+```
+
+A comment in `main.rs` now points to the lib.rs twin at line ~1668
+so the next maintainer doesn't re-introduce the drift.
+
+**Bonus.** The same session uncovered 7 pre-existing lib.rs test
+failures ("attempt to multiply with overflow" at `new_at_with`'s
+seed computation). The literal `0x9E37_79B9_7F4A_7C15` was being
+type-inferred as `i64` because of multiplication-context precedence,
+and the high bit set made it negative — `u64 * i64` overflowed.
+Fixed both `main.rs` and `lib.rs` with explicit `.wrapping_mul`
+and a `_u64` suffix on the literal.
+
+**Tests added.** Four regression tests in `crates/app/src/main.rs`
+under the new `v0.5.20: stairs arrival modal regression suite`
+banner. Three document the architectural drift (so the next
+maintainer doesn't delete them as redundant `lib.rs` coverage);
+one drives `App::draw` through `ratatui::backend::TestBackend` to
+prove the modal actually renders to screen, not just opens in state.
+
+**Architectural follow-up (not done in this PR).**
+`main.rs` and `lib.rs` are ~2150-line near-duplicates. The right
+fix is to make `main.rs` a thin shim that calls
+`asciirogue::run_main()` — then the next "patch landed in the wrong
+file" bug can't happen.
+
+Test totals: 84 pass / 0 fail (was 80 pass / 7 fail pre-fix).
+
+## v0.5.19 — Stairs trigger survives a loot on the stairs tile
+
 ### v0.5.19 — Stairs trigger survives a loot on the stairs tile
 
 User walkthrough exposed the real bug. When the player walked onto the

@@ -110,8 +110,7 @@ impl App {
     ) -> Self {
         let theme = FloorTheme::from_depth(floor);
         // Per-floor seed: combine base + floor so each descent is deterministic.
-        let seed = base_seed
-            .wrapping_add(floor as u64 * 0x9E37_79B9_7F4A_7C15);
+        let seed = base_seed.wrapping_add((floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64));
         let dungeon = bsp::generate(MAP_W, MAP_H, seed, bsp::Config::default());
         let mut world = World::new();
 
@@ -255,11 +254,12 @@ impl App {
                 // v0.5.17: simplified modal handler. Always log to confirm
                 // the branch was reached (debug aid; helps user verify
                 // whether the modal handler is being entered at all).
-                if matches!(self.modal, ModalMode::ConfirmStairs) {
+                if let ModalMode::ConfirmStairs { choice } = self.modal {
                     self.modal_redraws = 0;
                     self.log(format!("[modal] key={:?}", k.code));
                     match k.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        // Direct hotkeys — confirm the named choice.
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
                             self.modal = ModalMode::Closed;
                             self.at_stairs = false;
                             self.descend_internal();
@@ -273,6 +273,29 @@ impl App {
                             self.modal = ModalMode::Closed;
                             self.at_stairs = false;
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
+                        }
+                        // Navigation — only moves the cursor; the modal
+                        // stays open. v0.5.21, v0.5.22: switched to vertical
+                        // (Up/Down, k/j) to match the modal's two-row layout —
+                        // yes on row 1, no on row 2.
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.modal = ModalMode::ConfirmStairs { choice: false };
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.modal = ModalMode::ConfirmStairs { choice: true };
+                        }
+                        KeyCode::Tab => {
+                            self.modal = ModalMode::ConfirmStairs { choice: !choice };
+                        }
+                        // Confirm — acts on the current selection.
+                        KeyCode::Enter => {
+                            self.modal = ModalMode::Closed;
+                            self.at_stairs = false;
+                            if choice {
+                                self.descend_internal();
+                            } else {
+                                self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
+                            }
                         }
                         _ => {}
                     }
@@ -333,7 +356,7 @@ impl App {
                                 pos.0 = stairs;
                             }
                             self.recompute_fov();
-                            self.modal = ModalMode::ConfirmStairs;
+                            self.modal = ModalMode::ConfirmStairs { choice: true };
                             self.modal_redraws = 4;
                             self.at_stairs = true;
                             self.log("▼ — 내려갈까? (y/n) [debug warp]");
@@ -476,7 +499,7 @@ impl App {
         if matches!(self.modal, ModalMode::Closed)
             && matches!(self.dungeon.at(next.0, next.1), Tile::StairsDown)
         {
-            self.modal = ModalMode::ConfirmStairs;
+            self.modal = ModalMode::ConfirmStairs { choice: true };
             self.modal_redraws = 4;
             self.at_stairs = true;
             self.log("▼ — 내려갈까? (y/n)");
@@ -1014,7 +1037,7 @@ impl App {
         // v0.5.14: render whenever modal_redraws > 0 even if self.modal
         // was already cleared, so the popup is visible for at least one
         // full frame after the player steps onto the stairs tile.
-        if self.modal_redraws > 0 || matches!(self.modal, ModalMode::ConfirmStairs) {
+        if self.modal_redraws > 0 || matches!(self.modal, ModalMode::ConfirmStairs { .. }) {
             self.draw_confirm_stairs_modal(frame, area);
         }
     }
@@ -1024,6 +1047,9 @@ impl App {
     /// and restyled with a yellow highlight so the popup is unmistakable
     /// in the middle of gameplay (previously a 40x5 plain box that was
     /// easy to miss when the dungeon behind it was busy).
+    /// v0.5.21: visually highlight the currently-selected option with a
+    /// `▶` cursor + REVERSED style so the player can see what they're
+    /// about to confirm.
     fn draw_confirm_stairs_modal(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::layout::Rect;
         use ratatui::style::{Color, Modifier, Style};
@@ -1058,25 +1084,35 @@ impl App {
         frame.render_widget(block, popup);
 
         let prompt = i18n::t_for(I18nKey::MsgStairConfirm, self.locale);
-        let (y_label, y_hint, n_label) = match self.locale {
-            Locale::Korean => ("[y] 예 — 다음 층으로", "[Y]", "[n] 취소 — 머무름"),
-            Locale::English => ("[y] yes — descend", "[Y]", "[n] cancel — stay"),
+        let (y_label, n_label) = match self.locale {
+            Locale::Korean => ("[y] 예 — 다음 층으로", "[n] 취소 — 머무름"),
+            Locale::English => ("[y] yes — descend", "[n] cancel — stay"),
         };
+        let choice = match self.modal {
+            ModalMode::ConfirmStairs { choice } => choice,
+            // modal_redraws>0 frame after the modal was already cleared
+            // (v0.5.14 ghost-popup guard). Render as if yes is selected.
+            _ => true,
+        };
+        // The selected option carries REVERSED + BOLD + accent colour so
+        // the player has unambiguous visual feedback. The unselected
+        // option stays grey so the focus is clear.
         let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
         let grey = Style::default().fg(Color::Gray);
+        let y_style = if choice { yellow.add_modifier(Modifier::REVERSED) } else { grey };
+        let n_style = if !choice { grey.add_modifier(Modifier::REVERSED) } else { grey };
+        let y_cursor = if choice { "▶ " } else { "  " };
+        let n_cursor = if !choice { "▶ " } else { "  " };
         let prompt_styled = match self.locale {
-            Locale::Korean => format!("{}  {}", prompt, y_hint),
-            Locale::English => format!("{}  {}", prompt, y_hint),
+            Locale::Korean => format!("{}  [Y]", prompt),
+            Locale::English => format!("{}  [Y]", prompt),
         };
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(prompt_styled, yellow)),
             Line::from(""),
-            Line::from(vec![
-                Span::styled(y_label, yellow),
-                Span::raw("    "),
-                Span::styled(n_label, grey),
-            ]),
+            Line::from(Span::styled(format!("{}{}", y_cursor, y_label), y_style)),
+            Line::from(Span::styled(format!("{}{}", n_cursor, n_label), n_style)),
             Line::from(""),
         ];
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1634,7 +1670,16 @@ fn los_clear(a: TilePos, b: TilePos, sight_blocks: impl Fn(i32, i32) -> bool) ->
 }
 
 fn is_passable(d: &Dungeon, x: i32, y: i32) -> bool {
-    matches!(d.at(x, y), Tile::Floor)
+    // v0.5.20: include Tile::StairsDown. The procgen crate's canonical
+    // `Tile::is_passable()` (crates/procgen/src/lib.rs) already lists both
+    // Floor and StairsDown — this binary file's older copy missed
+    // StairsDown, so `try_player_act` returned early at the wall-check
+    // whenever the player walked onto a StairsDown tile, and the
+    // descent-confirm modal at the end of `try_player_act` never ran.
+    // The `~` debug warp bypasses `is_passable` entirely, which is why
+    // the bug looked like "the modal handler works but the natural-arrival
+    // path never fires". Keep in sync with the lib.rs twin (line ~1668).
+    matches!(d.at(x, y), Tile::Floor | Tile::StairsDown)
 }
 
 fn run() -> Result<()> {
@@ -2152,5 +2197,531 @@ mod tests {
         assert_eq!(key_to_direction(&KeyCode::Char('r')), None);
         assert_eq!(key_to_direction(&KeyCode::Esc), None);
         assert_eq!(key_to_direction(&KeyCode::Char(' ')), None);
+    }
+
+    // ─── v0.5.20: stairs arrival modal regression suite ────────────────────────
+    //
+    // Background: cargo run uses crates/app/src/main.rs (see Cargo.toml
+    // [[bin]] path = "src/main.rs"). All v0.5.11–v0.5.19 patches to
+    // try_player_act landed in lib.rs only; main.rs's copy of `is_passable`
+    // never learned about Tile::StairsDown, so the binary's natural
+    // movement was blocked at the stairs tile (modal trigger unreachable).
+    // The `~` debug warp bypasses is_passable, which is why the bug
+    // looked like "modal handler works fine".
+
+    /// Direct unit test: is_passable(stairs_tile) must be true. If this
+    /// returns false, try_player_act returns early at the wall-check and
+    /// the modal trigger at the end of the function never runs.
+    #[test]
+    fn is_passable_accepts_stairs_down() {
+        let app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        assert!(
+            matches!(app.dungeon.at(sx, sy), Tile::StairsDown),
+            "precondition: tile ({sx},{sy}) must be StairsDown (got {:?})",
+            app.dungeon.at(sx, sy)
+        );
+        assert!(
+            is_passable(&app.dungeon, sx, sy),
+            "is_passable must return true for Tile::StairsDown — \
+             otherwise natural movement onto stairs is blocked and the \
+             descent confirm modal never fires (v0.5.20)"
+        );
+    }
+
+    /// End-to-end: position the player on the floor tile directly left
+    /// of the stairs, press Right (handle -> try_player_act), and assert
+    /// the modal pops. This is the exact user-reported flow:
+    /// "자연스럽게 stairs 타일 위로 이동해도 descent confirm modal이 자동으로 뜨지 않음".
+    #[test]
+    fn walking_onto_stairs_pops_confirm_modal() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        // Put player one step to the LEFT of the stairs.
+        let start = TilePos(sx - 1, sy);
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = start;
+        }
+        assert!(
+            matches!(app.dungeon.at(start.0, start.1), Tile::Floor),
+            "precondition: starting tile must be Floor, got {:?}",
+            app.dungeon.at(start.0, start.1)
+        );
+        assert!(matches!(app.modal, ModalMode::Closed), "modal must start Closed");
+
+        let pos_before = app.world.get::<&Position>(app.player).unwrap().0;
+        eprintln!(
+            "[diag] before: pos={:?} stairs=({},{}) start_tile={:?} stairs_tile={:?} passable(stairs)={}",
+            pos_before, sx, sy,
+            app.dungeon.at(start.0, start.1),
+            app.dungeon.at(sx, sy),
+            is_passable(&app.dungeon, sx, sy),
+        );
+
+        // Walk Right — this is what the user does at the keyboard.
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        let pos_after = app.world.get::<&Position>(app.player).unwrap().0;
+        eprintln!(
+            "[diag] after: pos={:?} modal={:?} at_stairs={}",
+            pos_after, app.modal, app.at_stairs,
+        );
+
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "after walking onto StairsDown, modal must be ConfirmStairs \
+             (got {:?}). Player moved {:?} -> {:?}.",
+            app.modal, pos_before, pos_after,
+        );
+        assert!(
+            app.at_stairs,
+            "after walking onto StairsDown, at_stairs must be true \
+             so the header badge renders"
+        );
+    }
+
+    /// Regression: the `~` debug warp must STILL work (this was the only
+    /// path that triggered the modal before v0.5.20). Don't break it.
+    #[test]
+    fn debug_tilde_warp_still_opens_modal() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('~'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "~ debug warp must still open ConfirmStairs modal (got {:?})",
+            app.modal
+        );
+        assert!(app.at_stairs, "~ debug warp must still set at_stairs");
+    }
+
+    /// v0.5.21: the user-reported regression — modal opens but y/n does
+    /// nothing. Reproduce the full flow: walk to stairs → press y →
+    /// expect modal closed and floor incremented.
+    #[test]
+    fn pressing_y_in_modal_descends_to_next_floor() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let start_floor = app.floor;
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        // Position player one step to the LEFT of the stairs.
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+
+        // Walk Right → modal should pop (v0.5.20).
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "precondition: modal must be open after walking onto stairs");
+
+        // Now press y. THIS is what the user reports as broken.
+        let pos_before_y = app.world.get::<&Position>(app.player).unwrap().0;
+        eprintln!("[diag] before y: floor={} pos={:?} modal={:?}",
+            app.floor, pos_before_y, app.modal);
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        eprintln!("[diag] after y: floor={} pos={:?} modal={:?}",
+            app.floor,
+            app.world.get::<&Position>(app.player).unwrap().0,
+            app.modal);
+
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.21: pressing y in ConfirmStairs modal must close it (got {:?})",
+            app.modal);
+        assert_eq!(app.floor, start_floor + 1,
+            "v0.5.21: pressing y must descend to next floor (was {}, now {})",
+            start_floor, app.floor);
+    }
+
+    /// v0.5.21: n in modal must close without descending.
+    #[test]
+    fn pressing_n_in_modal_cancels_without_descending() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let start_floor = app.floor;
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.21: pressing n must close the modal (got {:?})", app.modal);
+        assert_eq!(app.floor, start_floor,
+            "v0.5.21: pressing n must NOT descend (was {}, now {})",
+            start_floor, app.floor);
+    }
+
+    // ─── v0.5.21: selection-state UX ─────────────────────────────────────
+    //
+    // The modal now carries a `choice: bool` (true = yes / descend,
+    // false = no / cancel). Players navigate with arrow keys / Tab,
+    // confirm with Enter, and y/n still work as direct hotkeys.
+
+    /// The modal opens with the "yes / descend" choice selected — the
+    /// player walked to the stairs on purpose, so descending is the
+    /// natural default. They have to navigate left to back out.
+    #[test]
+    fn modal_opens_with_yes_selected() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        match app.modal {
+            ModalMode::ConfirmStairs { choice } => {
+                assert!(choice, "modal must open with yes selected by default (got choice={})", choice);
+            }
+            other => panic!("expected ConfirmStairs, got {:?}", other),
+        }
+    }
+
+    /// Arrow Down moves the cursor down the option list to "no / cancel".
+    /// The modal stays open — only Enter / y / n close it. v0.5.22: the
+    /// navigation is vertical (Up/Down) so it matches the modal's two-row
+    /// layout — yes on row 1, no on row 2.
+    #[test]
+    fn arrow_down_moves_selection_to_no() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }),
+            "Down arrow must move selection to no (got {:?})", app.modal);
+    }
+
+    /// Arrow Up moves the cursor back up to "yes / descend".
+    #[test]
+    fn arrow_up_moves_selection_to_yes() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }));
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }),
+            "Up arrow must move selection back to yes (got {:?})", app.modal);
+    }
+
+    /// Enter with yes selected must descend.
+    #[test]
+    fn enter_with_yes_selected_descends() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let start_floor = app.floor;
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert_eq!(app.floor, start_floor + 1,
+            "Enter with yes selected must descend (was {}, now {})",
+            start_floor, app.floor);
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "Enter must close the modal");
+    }
+
+    /// Enter with no selected must cancel without descending.
+    #[test]
+    fn enter_with_no_selected_cancels() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let start_floor = app.floor;
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }));
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert_eq!(app.floor, start_floor,
+            "Enter with no selected must NOT descend (was {}, now {})",
+            start_floor, app.floor);
+        assert!(matches!(app.modal, ModalMode::Closed));
+    }
+
+    /// Visual: the selected option must be highlighted in the rendered
+    /// buffer with REVERSED style — without this, the player has no
+    /// visual feedback for which option is active.
+    #[test]
+    fn selected_option_renders_with_reverse_style() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let mut found_yes_cell_with_reverse = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "예"
+                    && cell.style().add_modifier.contains(ratatui::style::Modifier::REVERSED)
+                {
+                    found_yes_cell_with_reverse = true;
+                    break;
+                }
+            }
+            if found_yes_cell_with_reverse { break; }
+        }
+        assert!(found_yes_cell_with_reverse,
+            "selected yes option '예' must render with REVERSED style — \
+             user has no visual feedback for which option is active");
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: false }));
+
+        let backend2 = TestBackend::new(80, 24);
+        let mut terminal2 = Terminal::new(backend2).unwrap();
+        terminal2.draw(|f| app.draw(f)).unwrap();
+        let buf2 = terminal2.backend().buffer().clone();
+        let mut found_cancel_cell_with_reverse = false;
+        for y in 0..buf2.area.height {
+            for x in 0..buf2.area.width {
+                let cell = &buf2[(x, y)];
+                if cell.symbol() == "취"
+                    && cell.style().add_modifier.contains(ratatui::style::Modifier::REVERSED)
+                {
+                    found_cancel_cell_with_reverse = true;
+                    break;
+                }
+            }
+            if found_cancel_cell_with_reverse { break; }
+        }
+        assert!(found_cancel_cell_with_reverse,
+            "selected '취소' option must render with REVERSED style after navigation");
+    }
+
+    /// v0.5.20 surface proof: after walking onto StairsDown, the modal
+    /// actually renders to screen (not just the state machine). Drives
+    /// `App::draw` through ratatui's TestBackend and reads the buffer.
+    /// This is the same code path the real terminal uses.
+    #[test]
+    fn walking_onto_stairs_renders_modal_to_screen() {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::Span;
+        use ratatui::widgets::{Block, Borders, Paragraph};
+        use ratatui::Terminal;
+
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+
+        // App::draw buffer
+        let buf = terminal.backend().buffer().clone();
+
+        // Build a string of all cells for searching. CJK chars are 2 cells
+        // wide in ratatui: the first cell holds the glyph, the second is
+        // an empty continuation. We skip the empty continuations so the
+        // resulting string is the actual visible text — that's what a
+        // user reads on the terminal.
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                if !sym.is_empty() && sym != " " {
+                    rendered.push_str(sym);
+                }
+            }
+            rendered.push('\n');
+        }
+
+        assert!(
+            rendered.contains("내려가기"),
+            "modal must render '내려가기' (▼ 내려가기 확인) on screen — \
+             walking onto StairsDown produced an invisible modal. \
+             Buffer (first 10 lines):\n{}",
+            rendered.lines().take(10).collect::<Vec<_>>().join("\n"),
+        );
+        assert!(
+            rendered.contains("예"),
+            "modal prompt must include '[y] 예' on screen — \
+             user-facing Korean label for the descend hotkey. \
+             Buffer (first 10 lines):\n{}",
+            rendered.lines().take(10).collect::<Vec<_>>().join("\n"),
+        );
     }
 }

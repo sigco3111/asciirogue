@@ -83,7 +83,11 @@ pub enum ModalMode {
     Closed,
     Inventory { cursor: usize },
     /// v0.5.11: "▼ 다음 층으로 내려갈까?" — y/Enter = descend, n/Esc = cancel.
-    ConfirmStairs,
+    /// v0.5.21: `choice` carries the current selection so the player can
+    /// navigate with arrow keys / Tab and confirm with Enter. `true` =
+    /// yes (descend), `false` = no (cancel). The default is `true` —
+    /// players walked to the stairs on purpose, descending is natural.
+    ConfirmStairs { choice: bool },
 }
 
 /// Total floors in the run (SPEC §7 — keeping to 8 for v0.4 demo).
@@ -120,8 +124,7 @@ impl App {
     ) -> Self {
         let theme = FloorTheme::from_depth(floor);
         // Per-floor seed: combine base + floor so each descent is deterministic.
-        let seed = base_seed
-            .wrapping_add(floor as u64 * 0x9E37_79B9_7F4A_7C15);
+        let seed = base_seed.wrapping_add((floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64));
         let dungeon = bsp::generate(MAP_W, MAP_H, seed, bsp::Config::default());
         let mut world = World::new();
 
@@ -241,12 +244,12 @@ impl App {
                 // after the player has answered (prevents "ghost popup").
                 // v0.5.17: simplified modal handler. Always log to confirm
                 // the branch was reached (debug aid).
-                if matches!(self.modal, ModalMode::ConfirmStairs) {
+                if let ModalMode::ConfirmStairs { choice } = self.modal {
                     self.modal_redraws = 0;
                     self.log(format!("[modal] key={:?}", k.code));
                     match k.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y')
-                        | KeyCode::Enter => {
+                        // Direct hotkeys — confirm the named choice.
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
                             self.modal = ModalMode::Closed;
                             self.at_stairs = false;
                             self.descend_internal();
@@ -260,6 +263,29 @@ impl App {
                             self.modal = ModalMode::Closed;
                             self.at_stairs = false;
                             self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
+                        }
+                        // Navigation — only moves the cursor; the modal
+                        // stays open. v0.5.21, v0.5.22: switched to vertical
+                        // (Up/Down, k/j) to match the modal's two-row layout —
+                        // yes on row 1, no on row 2.
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.modal = ModalMode::ConfirmStairs { choice: false };
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.modal = ModalMode::ConfirmStairs { choice: true };
+                        }
+                        KeyCode::Tab => {
+                            self.modal = ModalMode::ConfirmStairs { choice: !choice };
+                        }
+                        // Confirm — acts on the current selection.
+                        KeyCode::Enter => {
+                            self.modal = ModalMode::Closed;
+                            self.at_stairs = false;
+                            if choice {
+                                self.descend_internal();
+                            } else {
+                                self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
+                            }
                         }
                         _ => {
                             // Ignore other keys — keep the modal open.
@@ -322,7 +348,7 @@ impl App {
                                 pos.0 = stairs;
                             }
                             self.recompute_fov();
-                            self.modal = ModalMode::ConfirmStairs;
+                            self.modal = ModalMode::ConfirmStairs { choice: true };
                             self.modal_redraws = 4;
                             self.at_stairs = true;
                             self.log("▼ — 내려갈까? (y/n) [debug warp]");
@@ -444,7 +470,7 @@ impl App {
         if matches!(self.modal, ModalMode::Closed)
             && matches!(self.dungeon.at(next.0, next.1), Tile::StairsDown)
         {
-            self.modal = ModalMode::ConfirmStairs;
+            self.modal = ModalMode::ConfirmStairs { choice: true };
             self.modal_redraws = 4;
             self.at_stairs = true;
             self.log("▼ — 내려갈까? (y/n)");
@@ -2166,8 +2192,8 @@ mod confirm_stairs_tests {
         // try_player_act only triggers confirm when we MOVE. So we call it
         // directly with a direction that yields stairs as the next tile.
         // Simpler: directly set the modal the way the real code would.
-        app.modal = ModalMode::ConfirmStairs;
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        app.modal = ModalMode::ConfirmStairs { choice: true };
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
     }
 
     #[test]
@@ -2175,7 +2201,7 @@ mod confirm_stairs_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let (sx, sy) = put_player_on_stairs(&mut app);
         clear_items(&mut app, sx, sy);
-        app.modal = ModalMode::ConfirmStairs;
+        app.modal = ModalMode::ConfirmStairs { choice: true };
         let start_floor = app.floor;
         app.handle(&char_event('y'));
         // Modal cleared, floor advanced.
@@ -2188,7 +2214,7 @@ mod confirm_stairs_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let (sx, sy) = put_player_on_stairs(&mut app);
         clear_items(&mut app, sx, sy);
-        app.modal = ModalMode::ConfirmStairs;
+        app.modal = ModalMode::ConfirmStairs { choice: true };
         let start_floor = app.floor;
         app.handle(&enter_event());
         assert!(matches!(app.modal, ModalMode::Closed));
@@ -2210,7 +2236,7 @@ mod confirm_stairs_tests {
             let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
             pos.0 = TilePos(fx, fy);
         }
-        app.modal = ModalMode::ConfirmStairs;
+        app.modal = ModalMode::ConfirmStairs { choice: true };
         let start_floor = app.floor;
         app.handle(&char_event('n'));
         assert!(matches!(app.modal, ModalMode::Closed), "modal must close after n");
@@ -2234,7 +2260,7 @@ mod confirm_stairs_tests {
             let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
             pos.0 = TilePos(fx, fy);
         }
-        app.modal = ModalMode::ConfirmStairs;
+        app.modal = ModalMode::ConfirmStairs { choice: true };
         let start_floor = app.floor;
         let esc = Event::Key(KeyEvent {
             code: KeyCode::Esc,
@@ -2252,9 +2278,9 @@ mod confirm_stairs_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let (sx, sy) = put_player_on_stairs(&mut app);
         clear_items(&mut app, sx, sy);
-        app.modal = ModalMode::ConfirmStairs;
+        app.modal = ModalMode::ConfirmStairs { choice: true };
         app.handle(&char_event('h')); // movement key — should be a no-op while modal is open
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
             "modal must stay open when irrelevant key is pressed");
     }
 
@@ -2295,7 +2321,7 @@ mod confirm_stairs_tests {
         // The direct modal assignment isn't what the real code does — the
         // real code calls try_player_act which sets the modal after the walk.
         // We assert the building-block: if the modal is set, y descends.
-        app.modal = ModalMode::ConfirmStairs;
+        app.modal = ModalMode::ConfirmStairs { choice: true };
         app.handle(&char_event('y'));
         assert_eq!(app.floor, 2);
     }
@@ -2384,7 +2410,7 @@ mod modal_redraws_tests {
             app.modal_redraws > 0,
             "debug warp should set modal_redraws > 0"
         );
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
     }
 
     /// v0.5.14: answering y clears modal_redraws to 0.
@@ -2542,7 +2568,7 @@ mod modal_recovery_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
         app.handle(&char_event('~'));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
         app.handle(&char_event('n'));
         // v0.5.18: modal closes, at_stairs cleared.
         assert!(matches!(app.modal, ModalMode::Closed),
@@ -2595,7 +2621,7 @@ mod v0_5_18_no_recovery_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
         app.handle(&char_event('~'));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
         app.handle(&char_event('n'));
         // v0.5.18: modal closes, at_stairs cleared, even though we are
         // still on the stairs tile.
@@ -2617,7 +2643,7 @@ mod v0_5_18_no_recovery_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         let _ = put_player_on_stairs(&mut app);
         app.handle(&char_event('~'));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
         app.handle(&char_event('n'));
         assert!(matches!(app.modal, ModalMode::Closed),
             "v0.5.18: n must close modal");
@@ -2680,7 +2706,7 @@ mod loot_on_stairs_tests {
         // Single 'l' press should walk onto the stairs and trigger modal.
         app.handle(&char_event('l'));
         assert!(
-            matches!(app.modal, ModalMode::ConfirmStairs),
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
             "v0.5.19: stairs modal must fire even when loot occupies the stairs tile"
         );
         assert!(app.at_stairs);
@@ -2700,7 +2726,7 @@ mod loot_on_stairs_tests {
         // Sanity.
         assert!(matches!(app.dungeon.at(sx, sy), Tile::StairsDown));
         app.handle(&char_event('l'));
-        assert!(matches!(app.modal, ModalMode::ConfirmStairs),
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
             "stairs modal must fire even when no loot is on the stairs");
     }
 }

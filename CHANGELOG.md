@@ -5,7 +5,25 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.25 — Player death event handling
+### v0.5.26 — `!` dev cheat: drop a potion
+
+Manual QA for the v0.5.25 death summary required walking the
+player into an enemy at low HP — fragile because (a) enemy
+positions vary by seed, (b) the player had to survive long enough
+to *reach* the enemy, (c) the 1 HP setup was awkward. v0.5.26
+adds a one-shot cheat key so we can pre-populate inventory
+without depending on loot RNG.
+
+Press `!` → drops a `치유 물약 (+15)` into the next free
+inventory slot. Logs `[치트] 물약 추가: 치유 물약 (+15)` on
+success, or `[치트] 인벤토리가 가득 차서 추가 실패` when
+the inventory is full. Lives next to the other debug keys
+(`r` re-roll seed, `c` clear viewshed, `~` stairs warp).
+
+Test totals: 104 pass / 0 fail (was 102 pass / 0 fail; added
+2 regression tests for the cheat's add / full-refusal paths).
+
+## v0.5.25 — Player death event handling
 
 Player death was previously a fire-and-forget event: `game_over =
 true`, two log lines, no meta-progression saved. A death on floor

@@ -374,6 +374,28 @@ impl App {
                             v.revealed.iter_mut().for_each(|r| *r = false);
                         }
                     }
+                    KeyCode::Char('!') => {
+                        // v0.5.26: dev cheat — drop a potion into the
+                        // player's inventory for testing. Logs success
+                        // or full-inventory refusal.
+                        let item = Item::potion_hp();
+                        let label = format!("{} (+{})", item.name, item.bonus);
+                        let outcome = if let Ok(mut inv) =
+                            self.world.get::<&mut Inventory>(self.player)
+                        {
+                            match inv.push(item) {
+                                Ok(_) => "added".to_string(),
+                                Err(()) => "full".to_string(),
+                            }
+                        } else {
+                            "no_inventory".to_string()
+                        };
+                        match outcome.as_str() {
+                            "added" => self.log(format!("[치트] 물약 추가: {}", label)),
+                            "full" => self.log("[치트] 인벤토리가 가득 차서 추가 실패"),
+                            _ => self.log("[치트] 인벤토리가 없어 추가 실패"),
+                        }
+                    }
                     KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
                         // `g` is the documented pickup key; `$` (gold sign) and
                         // `,` are intuitive aliases the player will reach

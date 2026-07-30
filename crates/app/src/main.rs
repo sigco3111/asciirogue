@@ -382,6 +382,28 @@ impl App {
                             v.revealed.iter_mut().for_each(|r| *r = false);
                         }
                     }
+                    KeyCode::Char('!') => {
+                        // v0.5.26: dev cheat — drop a potion into the
+                        // player's inventory for testing. Logs success
+                        // or full-inventory refusal.
+                        let item = Item::potion_hp();
+                        let label = format!("{} (+{})", item.name, item.bonus);
+                        let outcome = if let Ok(mut inv) =
+                            self.world.get::<&mut Inventory>(self.player)
+                        {
+                            match inv.push(item) {
+                                Ok(_) => "added".to_string(),
+                                Err(()) => "full".to_string(),
+                            }
+                        } else {
+                            "no_inventory".to_string()
+                        };
+                        match outcome.as_str() {
+                            "added" => self.log(format!("[치트] 물약 추가: {}", label)),
+                            "full" => self.log("[치트] 인벤토리가 가득 차서 추가 실패"),
+                            _ => self.log("[치트] 인벤토리가 없어 추가 실패"),
+                        }
+                    }
                     KeyCode::Char('g') | KeyCode::Char('G') | KeyCode::Char('$') | KeyCode::Char(',') => {
                         let mut gold_gained: u32 = 0;
                         match pick_up_outcome(&mut self.world, self.player, &mut gold_gained) {
@@ -3122,6 +3144,88 @@ mod tests {
         assert!(app.game_over);
         let _ = before_marks;
         let _ = before_wager;
+    }
+
+    // ─── v0.5.26: `!` debug cheat — add a potion for testing ────────────────
+    //
+    // Manual QA for the v0.5.25 death summary was fragile (had to walk
+    // the player into an enemy at low HP). Adding a `!` cheat lets us
+    // pre-populate inventory without depending on loot drops.
+
+    /// Pressing `!` adds a potion to the player's inventory.
+    #[test]
+    fn debug_bang_adds_potion() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        // Empty inventory first.
+        app.world
+            .get::<&mut Inventory>(app.player)
+            .unwrap()
+            .slots
+            .iter_mut()
+            .for_each(|s| *s = None);
+        let before = app
+            .world
+            .get::<&Inventory>(app.player)
+            .unwrap()
+            .slots
+            .iter()
+            .filter(|s| s.is_some())
+            .count();
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('!'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        let after = app
+            .world
+            .get::<&Inventory>(app.player)
+            .unwrap()
+            .slots
+            .iter()
+            .filter(|s| s.is_some())
+            .count();
+        assert_eq!(
+            after,
+            before + 1,
+            "v0.5.26: `!` must add exactly one slot item (was {}, now {})",
+            before,
+            after
+        );
+        let joined: String = app.messages.join(" | ");
+        assert!(
+            joined.contains("물약") || joined.contains("cheat") || joined.contains("치트"),
+            "v0.5.26: `!` must log the cheat. Messages: {}",
+            joined
+        );
+    }
+
+    /// `!` with a full inventory must log a refusal, not silently drop.
+    #[test]
+    fn debug_bang_refuses_when_inventory_full() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        // Fill every inventory slot with something.
+        {
+            let mut inv = app.world.get::<&mut Inventory>(app.player).unwrap();
+            for i in 0..inv.slots.len() {
+                let _ = inv.put_at(i, Item::gold(1));
+            }
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('!'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        let joined: String = app.messages.join(" | ");
+        assert!(
+            joined.contains("가득") || joined.contains("full") || joined.contains("실패"),
+            "v0.5.26: `!` with full inventory must log a refusal. Messages: {}",
+            joined
+        );
     }
     #[test]
     fn selected_option_renders_with_reverse_style() {

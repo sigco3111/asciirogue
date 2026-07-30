@@ -5,7 +5,39 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.23 — Boss-gate UX: modal stays open on rejection
+### v0.5.24 — Boss-floor modal hint
+
+The v0.5.23 boss gate keeps the modal open when descent is rejected,
+but the popup itself still doesn't explain WHY the gate is firing
+— the player has to read the buried log line. v0.5.24 adds an
+in-popup hint on the boss floor:
+
+```
+┌▼ 내려가기 확인───────────────────────────────────────────┐
+│                                                          │
+│▼ 다음 층으로 내려갈까?  [Y]                              │
+│                                                          │
+│▶ [y] 예 — 다음 층으로                                    │
+│  [n] 취소 — 머무름                                       │
+│                                                          │
+│※ 보스(D) 처치 후 이동 가능                               │
+└──────────────────────────────────────────────────────────┘
+```
+
+The `D` glyph is rendered red+BOLD so the player knows which entity
+gates the descent. English locale shows the equivalent
+`※ Defeat boss (D) to descend`. Non-boss floors keep the original
+5-row popup — the hint only appears where it's relevant.
+
+Implementation notes: the popup height bumps from 7 to 9 rows on
+the boss floor (2 borders + 7 inner rows including the hint).
+Paragraph renders overflow silently, so the height calculation
+must include the hint line or it gets cropped.
+
+Test totals: 98 pass / 0 fail (was 96 pass / 0 fail; added 2 boss
+hint regression tests in `crates/app/src/main.rs`).
+
+## v0.5.23 — Boss-gate UX: modal stays open on rejection
 
 The v0.5.10 boss gate in `descend_internal` already blocked
 descent on the boss floor without defeating the boss — but the

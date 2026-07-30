@@ -1071,10 +1071,18 @@ impl App {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-        // Bigger, wider popup: 60% of width, 7 rows tall. Minimum 36x5 so
-        // it stays readable on smaller terminals.
+        // v0.5.24: the boss floor gets an extra hint line that names the
+        // boss glyph — without it the player sees the gate rejection
+        // in the log line but the popup itself doesn't explain WHY.
+        let is_boss_floor = self.floor == BOSS_FLOOR;
+        // Bigger, wider popup: 60% of width. 7 rows on regular floors,
+        // 9 on the boss floor (2 borders + 7 inner rows incl. hint).
         let popup_w = (area.width * 60 / 100).max(36).min(area.width.saturating_sub(2));
-        let popup_h = 7u16.min(area.height.saturating_sub(2));
+        let popup_h = if is_boss_floor {
+            9u16.min(area.height.saturating_sub(2))
+        } else {
+            7u16.min(area.height.saturating_sub(2))
+        };
         let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
         let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
         let popup: Rect = Rect::new(x, y, popup_w, popup_h);
@@ -1099,9 +1107,19 @@ impl App {
         frame.render_widget(block, popup);
 
         let prompt = i18n::t_for(I18nKey::MsgStairConfirm, self.locale);
-        let (y_label, n_label) = match self.locale {
-            Locale::Korean => ("[y] 예 — 다음 층으로", "[n] 취소 — 머무름"),
-            Locale::English => ("[y] yes — descend", "[n] cancel — stay"),
+        let (y_label, n_label, boss_hint_prefix, boss_hint_suffix) = match self.locale {
+            Locale::Korean => (
+                "[y] 예 — 다음 층으로",
+                "[n] 취소 — 머무름",
+                "※ 보스(",
+                ") 처치 후 이동 가능",
+            ),
+            Locale::English => (
+                "[y] yes — descend",
+                "[n] cancel — stay",
+                "※ Defeat boss (",
+                ") to descend",
+            ),
         };
         let choice = match self.modal {
             ModalMode::ConfirmStairs { choice } => choice,
@@ -1122,7 +1140,7 @@ impl App {
             Locale::Korean => format!("{}  [Y]", prompt),
             Locale::English => format!("{}  [Y]", prompt),
         };
-        let lines = vec![
+        let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(prompt_styled, yellow)),
             Line::from(""),
@@ -1130,6 +1148,16 @@ impl App {
             Line::from(Span::styled(format!("{}{}", n_cursor, n_label), n_style)),
             Line::from(""),
         ];
+        if is_boss_floor {
+            // v0.5.24: in-popup boss hint — name the glyph (D) so the
+            // player knows which entity gates the descent.
+            let boss_red = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+            lines.push(Line::from(vec![
+                Span::styled(boss_hint_prefix, grey),
+                Span::styled("D", boss_red),
+                Span::styled(boss_hint_suffix, grey),
+            ]));
+        }
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(p, inner);
     }
@@ -2767,6 +2795,133 @@ mod tests {
         );
         assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
             "v0.5.23: Enter must also keep the modal open on boss-gate rejection");
+    }
+
+    // ─── v0.5.24: boss floor modal hint ──────────────────────────────────────────
+    //
+    // The user asked for an in-popup hint on the boss floor so they
+    // understand the boss gate without having to read the buried log
+    // line ("보스를 먼저 처치하세요"). The modal must explicitly tell
+    // them: "defeat the boss (D) before you can descend".
+
+    /// On the boss floor, the modal must render an in-popup hint
+    /// mentioning the boss glyph (`D`) so the player understands the
+    /// gate before they press `y`.
+    #[test]
+    fn boss_floor_modal_renders_boss_hint() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("boss floor must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Build a render string — CJK chars are 2 cells wide so we skip
+        // the empty continuation cells (matches the v0.5.21 helper).
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                if !sym.is_empty() && sym != " " {
+                    rendered.push_str(sym);
+                }
+            }
+            rendered.push('\n');
+        }
+
+        assert!(
+            rendered.contains("보스"),
+            "v0.5.24: boss floor modal must render '보스' hint so the player \
+             knows the gate is boss-related — otherwise the popup gives no \
+             in-place reason for the rejection. Render:\n{}",
+            rendered
+                .lines()
+                .filter(|l| l.contains("내려") || l.contains("예") || l.contains("취") || l.contains("보"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            rendered.contains("(D)") || rendered.contains('D'),
+            "v0.5.24: hint must mention the boss glyph D so the player knows \
+             which entity blocks them. Render:\n{}",
+            rendered
+                .lines()
+                .filter(|l| l.contains("보"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// On non-boss floors the boss hint must NOT appear — the gate
+    /// doesn't apply, so showing it would mislead the player.
+    #[test]
+    fn non_boss_floor_modal_does_not_render_boss_hint() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        assert_ne!(app.floor, BOSS_FLOOR);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("floor 1 must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                if !sym.is_empty() && sym != " " {
+                    rendered.push_str(sym);
+                }
+            }
+            rendered.push('\n');
+        }
+
+        assert!(
+            !rendered.contains("보스"),
+            "v0.5.24: non-boss floor modal must NOT show the boss hint — \
+             the gate doesn't apply. Modal showed:\n{}",
+            rendered
+                .lines()
+                .filter(|l| l.contains("내려") || l.contains("예") || l.contains("취"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
     #[test]
     fn selected_option_renders_with_reverse_style() {

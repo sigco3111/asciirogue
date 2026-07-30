@@ -5,7 +5,44 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.24 — Boss-floor modal hint
+### v0.5.25 — Player death event handling
+
+Player death was previously a fire-and-forget event: `game_over =
+true`, two log lines, no meta-progression saved. A death on floor
+4 wiped out everything the player had done up to that point —
+no marks of the departed for bosses killed, no last-wager gold
+deposit. v0.5.25 treats death as a real end-of-run event:
+
+- New `run_bosses_killed` counter on `App`, incremented when a
+  floor boss dies.
+- New `on_player_death()` method (idempotent — repeated calls
+  don't double-deposit). Triggered by `enemy_take_turns` when
+  the player's HP reaches zero.
+- On death, calls `remembrance.on_run_end(floor, gold,
+  run_bosses_killed)`. Even non-clearing runs now earn marks of
+  the departed for every boss killed, and 10% of remaining gold
+  (capped at 200) is deposited to the last-wager pool. The
+  remembrance is persisted to disk.
+- The log is replaced with a death summary so the player can
+  read what they accomplished in this run:
+
+  ```
+  ═══ 쓰러졌습니다… ═══
+  도달: 4F (4층) — 보스 2명 처치
+  남긴 Gold: 130 — 영혼 +2 표시 / +13 골드 (마지막 노림전)
+  R = 새 게임, q = 종료
+  ```
+
+Implementation notes: `descend_internal` still uses `on_run_end` for
+the WIN path (clearing floor 8). `on_player_death` uses the same
+method with the floor-at-time-of-death. The two paths share the
+clearing-bonus logic via `on_run_end`'s `final_floor >= 8` check
+(champions + clears only unlock on a full clear).
+
+Test totals: 102 pass / 0 fail (was 98 pass / 0 fail; added 4
+death-event regression tests in `crates/app/src/main.rs`).
+
+## v0.5.24 — Boss-floor modal hint
 
 The v0.5.23 boss gate keeps the modal open when descent is rejected,
 but the popup itself still doesn't explain WHY the gate is firing

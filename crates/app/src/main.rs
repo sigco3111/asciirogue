@@ -50,6 +50,10 @@ struct App {
     tick: u64,
     /// True when the boss for this floor is defeated; used to enable descent.
     boss_defeated: bool,
+    /// v0.5.25: bosses killed this run. Reset on new game, accumulated
+    /// when the player defeats a floor boss. Used by the death handler
+    /// to grant marks of the departed proportional to progress.
+    run_bosses_killed: u32,
     /// Active locale (toggle with `L`).
     locale: Locale,
     /// Persistent meta state (Soul Remembrance).
@@ -163,6 +167,7 @@ impl App {
             messages: vec![startup_msg],
             tick: 0,
             boss_defeated,
+            run_bosses_killed: 0,
             locale,
             remembrance,
             gold: carried_gold,
@@ -723,6 +728,7 @@ impl App {
         }
         if boss.is_some() && !self.boss_defeated {
             self.boss_defeated = true;
+            self.run_bosses_killed = self.run_bosses_killed.saturating_add(1);
             self.log(format!("{}층 보스 격파! '>' 내려가기.", self.floor));
         }
         // Death check on player.
@@ -731,13 +737,53 @@ impl App {
             .get::<&Health>(self.player)
             .map(|h| h.is_dead())
             .unwrap_or(false);
-        if player_died && !self.game_over {
-            self.game_over = true;
-            // Clear queue, push a single announcement that is hard to miss.
-            self.messages.clear();
-            self.messages.push("═══ 쓰러졌습니다… ═══".to_string());
-            self.messages.push("R = 새 게임, q = 종료".to_string());
+        if player_died {
+            self.on_player_death();
         }
+    }
+
+    /// v0.5.25: treat player death as a real end-of-run event. Idempotent:
+    /// repeated calls (e.g. an extra enemy tick before the input loop
+    /// notices `game_over`) do NOT re-deposit gold or double-count marks.
+    /// Side-effects:
+    ///   1. Call `remembrance.on_run_end(floor, gold, run_bosses_killed)`
+    ///      so partial progress (last-wager gold, marks of the departed)
+    ///      is preserved across deaths.
+    ///   2. Persist the remembrance to disk.
+    ///   3. Replace the log with a death summary so the player can
+    ///      read what they accomplished in this run.
+    fn on_player_death(&mut self) {
+        if self.game_over {
+            return;
+        }
+        self.game_over = true;
+        let bosses = self.run_bosses_killed;
+        let floor = self.floor;
+        let gold = self.gold;
+        self.remembrance.on_run_end(floor, gold, bosses);
+        let _ = save_remembrance(&self.remembrance);
+        self.messages.clear();
+        self.messages.push("═══ 쓰러졌습니다… ═══".to_string());
+        self.messages.push(format!(
+            "도달: {}F ({}층) — 보스 {}명 처치",
+            floor, floor, bosses
+        ));
+        self.messages.push(format!(
+            "남긴 Gold: {} — 영혼 +{} 표시 / +{} 골드 (마지막 노림전)",
+            gold,
+            bosses,
+            (gold / 10).min(200),
+        ));
+        self.messages.push("R = 새 게임, q = 종료".to_string());
+    }
+
+    /// v0.5.25: test-only entry point for the death handler. Tests use
+    /// this to force-trigger death without setting up a full enemy
+    /// tick. Production code goes through `enemy_take_turns` →
+    /// `on_player_death` automatically.
+    #[doc(hidden)]
+    pub fn on_player_died_for_tests(&mut self) {
+        self.on_player_death();
     }
 
     fn enemy_take_turns(&mut self) {
@@ -2922,6 +2968,160 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+    }
+
+    // ─── v0.5.25: player death event ──────────────────────────────────────────────
+    //
+    // The previous death handler just set game_over=true and pushed two log
+    // lines. v0.5.25 treats death as a real end-of-run event:
+    //   * Call remembrance.on_run_end(floor, gold, bosses_killed) so partial
+    //     progress (marks of the departed, last-wager gold) is saved.
+    //   * Persist the remembrance to disk.
+    //   * Push a death summary so the player sees what they accomplished.
+    //   * The handler fires only once (no double-counting if death-check
+    //     somehow runs again while game_over=true).
+
+    /// v0.5.25: when the player dies, the soul remembrance must be
+    /// updated with the floor reached and gold at time of death —
+    /// even though the run wasn't a clear, partial progress is
+    /// preserved so deaths feel meaningful.
+    #[test]
+    fn death_saves_partial_remembrance() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 4);
+        let starting_marks = app.remembrance.marks_of_departed;
+        let starting_wager = app.remembrance.last_wager_gold;
+
+        // Inject some gold so the last-wager deposit is non-zero.
+        app.gold += 100;
+
+        // Force the player to die by zeroing HP via the world directly.
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 0;
+        }
+
+        // Trigger the death handler directly — same path enemy_take_turns
+        // uses internally after the player_died check.
+        app.on_player_died_for_tests();
+
+        // Floor 4 death must NOT increment clears or champion_count
+        // (those only unlock on full clears per on_run_end's contract).
+        // But marks_of_departed is allowed to stay the same since no
+        // boss was killed on this run.
+        assert!(
+            app.remembrance.marks_of_departed >= starting_marks,
+            "v0.5.25: death must not lose marks (was {}, now {})",
+            starting_marks,
+            app.remembrance.marks_of_departed
+        );
+        assert!(
+            app.remembrance.last_wager_gold > starting_wager,
+            "v0.5.25: death must deposit 10% of gold to last-wager pool \
+             (was {}, now {})",
+            starting_wager,
+            app.remembrance.last_wager_gold
+        );
+        assert!(app.game_over, "v0.5.25: death must set game_over=true");
+    }
+
+    /// v0.5.25: a death summary must appear in the log so the player
+    /// sees what they accomplished (floor, gold, marks earned).
+    #[test]
+    fn death_summary_messages_are_pushed() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 3);
+        app.gold += 50;
+
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 0;
+        }
+        app.on_player_died_for_tests();
+
+        let joined: String = app.messages.join(" | ");
+        assert!(
+            joined.contains("쓰러졌") || joined.contains("사망"),
+            "v0.5.25: death summary must announce the death. Messages: {}",
+            joined
+        );
+        assert!(
+            joined.contains("3F") || joined.contains("3f") || joined.contains("도달"),
+            "v0.5.25: death summary must show floor reached (3F). Messages: {}",
+            joined
+        );
+        assert!(
+            joined.contains("R") && (joined.contains("새 게임") || joined.contains("재시작")),
+            "v0.5.25: death summary must show restart hotkey. Messages: {}",
+            joined
+        );
+    }
+
+    /// v0.5.25: bosses killed during the run must be reflected in the
+    /// death summary AND in the marks_of_departed granted to the
+    /// remembrance. This is the only way partial progress survives.
+    #[test]
+    fn death_credits_bosses_killed_to_remembrance() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 6);
+        app.gold += 200;
+        // Simulate the player having killed 3 bosses during this run
+        // before dying on floor 6.
+        app.run_bosses_killed = 3;
+        let starting_marks = app.remembrance.marks_of_departed;
+
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 0;
+        }
+        app.on_player_died_for_tests();
+
+        let joined: String = app.messages.join(" | ");
+        assert!(
+            joined.contains("보스 3명 처치"),
+            "v0.5.25: summary must show bosses killed (3). Messages: {}",
+            joined
+        );
+        assert!(
+            joined.contains("+3 표시"),
+            "v0.5.25: summary must show marks earned (+3). Messages: {}",
+            joined
+        );
+        assert_eq!(
+            app.remembrance.marks_of_departed,
+            starting_marks + 3,
+            "v0.5.25: death must award marks of the departed for bosses killed"
+        );
+    }
+
+    /// v0.5.25: the death handler must fire exactly once. If death-check
+    /// runs again while game_over=true (e.g. an extra enemy tick before
+    /// the modal closes), we must NOT re-deposit gold or re-increment
+    /// counters.
+    #[test]
+    fn death_handler_is_idempotent() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 2);
+        app.gold += 200;
+
+        if let Ok(mut h) = app.world.get::<&mut Health>(app.player) {
+            h.current = 0;
+        }
+
+        let before_marks = app.remembrance.marks_of_departed;
+        let before_wager = app.remembrance.last_wager_gold;
+
+        app.on_player_died_for_tests();
+        let marks_after_first = app.remembrance.marks_of_departed;
+        let wager_after_first = app.remembrance.last_wager_gold;
+
+        app.on_player_died_for_tests();
+        app.on_player_died_for_tests();
+
+        assert_eq!(
+            app.remembrance.marks_of_departed, marks_after_first,
+            "v0.5.25: death handler must be idempotent — marks doubled"
+        );
+        assert_eq!(
+            app.remembrance.last_wager_gold, wager_after_first,
+            "v0.5.25: death handler must be idempotent — wager doubled"
+        );
+        assert!(app.game_over);
+        let _ = before_marks;
+        let _ = before_wager;
     }
     #[test]
     fn selected_option_renders_with_reverse_style() {

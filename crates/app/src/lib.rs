@@ -47,6 +47,10 @@ pub struct App {
     tick: u64,
     /// True when the boss for this floor is defeated; used to enable descent.
     boss_defeated: bool,
+    /// v0.5.25: bosses killed this run. Reset on new game, accumulated
+    /// when the player defeats a floor boss. Used by the death handler
+    /// to grant marks of the departed proportional to progress.
+    run_bosses_killed: u32,
     /// Active locale (toggle with `L`).
     locale: Locale,
     /// Persistent meta state (Soul Remembrance).
@@ -177,6 +181,7 @@ impl App {
             messages: vec![startup_msg],
             tick: 0,
             boss_defeated,
+            run_bosses_killed: 0,
             locale,
             remembrance,
             gold: carried_gold,
@@ -625,6 +630,7 @@ impl App {
         }
         if boss.is_some() && !self.boss_defeated {
             self.boss_defeated = true;
+            self.run_bosses_killed = self.run_bosses_killed.saturating_add(1);
             self.log(format!("{}층 보스 격파! '>' 내려가기.", self.floor));
         }
         // Death check on player.
@@ -633,13 +639,43 @@ impl App {
             .get::<&Health>(self.player)
             .map(|h| h.is_dead())
             .unwrap_or(false);
-        if player_died && !self.game_over {
-            self.game_over = true;
-            // Clear queue, push a single announcement that is hard to miss.
-            self.messages.clear();
-            self.messages.push("═══ 쓰러졌습니다… ═══".to_string());
-            self.messages.push("R = 새 게임, q = 종료".to_string());
+        if player_died {
+            self.on_player_death();
         }
+    }
+
+    /// v0.5.25: treat player death as a real end-of-run event. Idempotent:
+    /// repeated calls do NOT re-deposit gold or double-count marks.
+    /// Side-effects:
+    ///   1. Call `remembrance.on_run_end(floor, gold, run_bosses_killed)`
+    ///      so partial progress (last-wager gold, marks of the departed)
+    ///      is preserved across deaths.
+    ///   2. Persist the remembrance to disk.
+    ///   3. Replace the log with a death summary so the player can
+    ///      read what they accomplished in this run.
+    pub fn on_player_death(&mut self) {
+        if self.game_over {
+            return;
+        }
+        self.game_over = true;
+        let bosses = self.run_bosses_killed;
+        let floor = self.floor;
+        let gold = self.gold;
+        self.remembrance.on_run_end(floor, gold, bosses);
+        let _ = save_remembrance(&self.remembrance);
+        self.messages.clear();
+        self.messages.push("═══ 쓰러졌습니다… ═══".to_string());
+        self.messages.push(format!(
+            "도달: {}F ({}층) — 보스 {}명 처치",
+            floor, floor, bosses
+        ));
+        self.messages.push(format!(
+            "남긴 Gold: {} — 영혼 +{} 표시 / +{} 골드 (마지막 노림전)",
+            gold,
+            bosses,
+            (gold / 10).min(200),
+        ));
+        self.messages.push("R = 새 게임, q = 종료".to_string());
     }
 
     pub fn enemy_take_turns(&mut self) {

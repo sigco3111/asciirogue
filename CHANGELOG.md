@@ -5,7 +5,30 @@ All notable changes to asciirogue are documented here. Versions follow
 
 ## [Unreleased]
 
-### v0.5.22 — Stairs modal: vertical navigation (Up/Down)
+### v0.5.23 — Boss-gate UX: modal stays open on rejection
+
+The v0.5.10 boss gate in `descend_internal` already blocked
+descent on the boss floor without defeating the boss — but the
+modal closed anyway after `y` / Enter, leaving only a buried
+log line. Players saw the popup vanish and assumed descent
+succeeded. v0.5.23 fixes the feedback:
+
+- `descend_internal` now returns `bool` (true = descended, false
+  = blocked). Both the boss-gate path and the end-of-run path
+  return false.
+- The modal handler only closes the popup when descent succeeded.
+  On boss-gate rejection, the popup stays open so the player sees
+  the constraint and must explicitly cancel with `n` / `Esc`.
+- Same UX for `Enter` with the "yes" choice.
+
+`crates/app/src/main.rs` and `crates/app/src/lib.rs` both updated
+to keep them in sync (the v0.5.3 lib+bin split is still the
+underlying architectural drift).
+
+Test totals: 96 pass / 0 fail (was 92 pass / 0 fail; added 2
+boss-gate UX regression tests in `crates/app/src/main.rs`).
+
+## v0.5.22 — Stairs modal: vertical navigation (Up/Down)
 
 v0.5.21 added horizontal navigation (Left/Right) but the modal lays
 out its two options vertically — `[y] 예` on row 1, `[n] 취소` on

@@ -249,10 +249,15 @@ impl App {
                     self.log(format!("[modal] key={:?}", k.code));
                     match k.code {
                         // Direct hotkeys — confirm the named choice.
+                        // v0.5.23: only close the modal when descent actually
+                        // succeeded. If the boss gate (or end-of-run) fires,
+                        // descend_internal returns false and the popup stays
+                        // open so the player sees the constraint.
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            self.modal = ModalMode::Closed;
-                            self.at_stairs = false;
-                            self.descend_internal();
+                            if self.descend_internal() {
+                                self.modal = ModalMode::Closed;
+                                self.at_stairs = false;
+                            }
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                             // v0.5.18: n/Esc just closes the modal. We do
@@ -278,12 +283,16 @@ impl App {
                             self.modal = ModalMode::ConfirmStairs { choice: !choice };
                         }
                         // Confirm — acts on the current selection.
+                        // v0.5.23: same gate-aware close as the y/Y hotkeys.
                         KeyCode::Enter => {
-                            self.modal = ModalMode::Closed;
-                            self.at_stairs = false;
                             if choice {
-                                self.descend_internal();
+                                if self.descend_internal() {
+                                    self.modal = ModalMode::Closed;
+                                    self.at_stairs = false;
+                                }
                             } else {
+                                self.modal = ModalMode::Closed;
+                                self.at_stairs = false;
                                 self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                             }
                         }
@@ -477,14 +486,17 @@ impl App {
         }
     }
 
-    /// v0.5.11: descend to the next floor from a StairsDown tile. Caller
-    /// is responsible for setting  first; this
-    /// helper only handles the floor transition + reward/last-floor logic.
-    /// Boss gate and end-of-run rewards are unchanged from v0.5.10.
-    fn descend_internal(&mut self) {
+    /// v0.5.11: descend to the next floor from a StairsDown tile.
+    /// Returns `true` if the player actually descended, `false` if the
+    /// descent was blocked (boss gate, end-of-run). v0.5.23: the modal
+    /// handler uses this return value to keep the popup open when the
+    /// gate fires — otherwise the player sees the popup vanish and
+    /// assumes descent succeeded.
+    fn descend_internal(&mut self) -> bool {
         let next_floor = self.floor + 1;
         if self.floor == BOSS_FLOOR && !self.boss_defeated {
             self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
+            false
         } else if next_floor > MAX_FLOORS {
             self.log(i18n::t_for(I18nKey::MsgAlreadyAtBottom, self.locale));
             self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
@@ -494,6 +506,7 @@ impl App {
                 self.remembrance.clears,
                 self.remembrance.wisps,
             ));
+            false
         } else {
             let args: [&dyn std::fmt::Display; 1] = [&next_floor as &dyn std::fmt::Display];
             let msg = t_format_with_locale(
@@ -507,6 +520,7 @@ impl App {
             let seed_save = self.seed;
             *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
             self.log(msg);
+            true
         }
     }
 

@@ -259,10 +259,15 @@ impl App {
                     self.log(format!("[modal] key={:?}", k.code));
                     match k.code {
                         // Direct hotkeys — confirm the named choice.
+                        // v0.5.23: only close the modal when descent actually
+                        // succeeded. If the boss gate (or end-of-run) fires,
+                        // descend_internal returns false and the popup stays
+                        // open so the player sees the constraint.
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            self.modal = ModalMode::Closed;
-                            self.at_stairs = false;
-                            self.descend_internal();
+                            if self.descend_internal() {
+                                self.modal = ModalMode::Closed;
+                                self.at_stairs = false;
+                            }
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                             // v0.5.18: n/Esc just closes the modal. We do
@@ -288,12 +293,16 @@ impl App {
                             self.modal = ModalMode::ConfirmStairs { choice: !choice };
                         }
                         // Confirm — acts on the current selection.
+                        // v0.5.23: same gate-aware close as the y/Y hotkeys.
                         KeyCode::Enter => {
-                            self.modal = ModalMode::Closed;
-                            self.at_stairs = false;
                             if choice {
-                                self.descend_internal();
+                                if self.descend_internal() {
+                                    self.modal = ModalMode::Closed;
+                                    self.at_stairs = false;
+                                }
                             } else {
+                                self.modal = ModalMode::Closed;
+                                self.at_stairs = false;
                                 self.log(i18n::t_for(I18nKey::MsgStairCancel, self.locale));
                             }
                         }
@@ -506,15 +515,20 @@ impl App {
         }
     }
 
-    /// v0.5.11: descend to the next floor from a StairsDown tile. Caller
-    /// is responsible for setting `modal = ModalMode::Closed` first.
-    fn descend_internal(&mut self) {
+    /// v0.5.11: descend to the next floor from a StairsDown tile.
+    /// Returns `true` if the player actually descended, `false` if the
+    /// descent was blocked (boss gate, end-of-run). v0.5.23: the modal
+    /// handler uses this return value to keep the popup open when the
+    /// gate fires — otherwise the player sees the popup vanish and
+    /// assumes descent succeeded.
+    fn descend_internal(&mut self) -> bool {
         let next_floor = self.floor + 1;
         if self.floor == BOSS_FLOOR && !self.boss_defeated {
             self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
-            return;
+            return false;
         }
         if next_floor > MAX_FLOORS {
+            self.log(i18n::t_for(I18nKey::MsgBossFirst, self.locale));
             self.log(i18n::t_for(I18nKey::MsgAlreadyAtBottom, self.locale));
             self.remembrance.on_run_end(MAX_FLOORS, self.gold, 1);
             let _ = save_remembrance(&self.remembrance);
@@ -523,7 +537,7 @@ impl App {
                 self.remembrance.clears,
                 self.remembrance.wisps,
             ));
-            return;
+            return false;
         }
         let args: [&dyn std::fmt::Display; 1] = [&next_floor as &dyn std::fmt::Display];
         let msg = t_format_with_locale(I18nKey::MsgStairDescendOk, self.locale, &args);
@@ -533,6 +547,7 @@ impl App {
         let seed_save = self.seed;
         *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
         self.log(msg);
+        true
     }
 
     /// v0.5.7: dispatch one inventory-modal key. Mutates `self.modal`.
@@ -2579,9 +2594,180 @@ mod tests {
         assert!(matches!(app.modal, ModalMode::Closed));
     }
 
-    /// Visual: the selected option must be highlighted in the rendered
-    /// buffer with REVERSED style — without this, the player has no
-    /// visual feedback for which option is active.
+    // ─── v0.5.23: boss gate ─────────────────────────────────────────────────────
+    //
+    // The v0.5.10-era boss check in `descend_internal` is supposed to
+    // block `y` / Enter from descending on the boss floor without
+    // defeating the boss. v0.5.23 adds the UX contract: the modal must
+    // STAY OPEN when the gate triggers so the player sees the constraint
+    // instead of having the modal vanish and assuming descent succeeded.
+
+    /// On the boss floor, walking onto stairs opens the modal but
+    /// pressing `y` must NOT descend — the boss is still alive.
+    #[test]
+    fn cannot_descend_from_boss_floor_without_defeating_boss() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
+        let start_floor = app.floor;
+        assert_eq!(start_floor, BOSS_FLOOR, "precondition: we are on the boss floor");
+        assert!(!app.boss_defeated, "precondition: boss is not yet defeated");
+
+        // Walk to stairs — modal pops.
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("boss floor must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+
+        // Press y — must NOT descend because boss is still alive.
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        assert_eq!(
+            app.floor, start_floor,
+            "v0.5.23: pressing y on boss floor without defeating boss must NOT descend \
+             (was {}, now {})",
+            start_floor, app.floor
+        );
+        assert!(
+            app.messages.iter().any(|m| m.contains("보스를 먼저 처치")),
+            "modal should log the boss-gate message: {:?}",
+            app.messages
+        );
+    }
+
+    /// v0.5.23: the modal must STAY OPEN when the boss gate triggers —
+    /// otherwise the player sees the popup vanish and assumes descent
+    /// succeeded. The boss-gate message goes in the log, but the
+    /// popup must remain so the player is forced to acknowledge the
+    /// constraint (cancel with n/Esc).
+    #[test]
+    fn boss_gate_keeps_modal_open() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("boss floor must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { choice: true }));
+
+        // Press y — boss gate triggers.
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        assert!(
+            matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "v0.5.23: modal must STAY OPEN after boss-gate rejection — \
+             otherwise the popup vanishes and the player thinks descent \
+             succeeded. Got modal={:?}",
+            app.modal
+        );
+    }
+
+    /// v0.5.23: pressing n on the boss floor cancels the modal — the
+    /// player can back out without descending.
+    #[test]
+    fn boss_gate_n_cancels_modal() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("boss floor must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }));
+
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        assert!(matches!(app.modal, ModalMode::Closed),
+            "v0.5.23: n must cancel the modal even when boss gate is active");
+    }
+
+    /// Enter with the cursor on "yes" must also be blocked on the boss
+    /// floor without defeating — every confirm path goes through
+    /// `descend_internal`.
+    #[test]
+    fn cannot_descend_via_enter_on_boss_floor_without_defeating_boss() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, BOSS_FLOOR);
+        let start_floor = app.floor;
+        let (sx, sy) = app
+            .dungeon
+            .stairs
+            .map(|p| (p.0, p.1))
+            .expect("boss floor must place a StairsDown tile");
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(sx - 1, sy);
+        }
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+        // Default choice is yes → Enter descends.
+        app.handle(&Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }));
+
+        assert_eq!(
+            app.floor, start_floor,
+            "v0.5.23: pressing Enter on boss floor without defeating boss must NOT descend"
+        );
+        assert!(matches!(app.modal, ModalMode::ConfirmStairs { .. }),
+            "v0.5.23: Enter must also keep the modal open on boss-gate rejection");
+    }
     #[test]
     fn selected_option_renders_with_reverse_style() {
         use ratatui::backend::TestBackend;

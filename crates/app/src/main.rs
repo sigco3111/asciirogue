@@ -10,7 +10,7 @@ use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
     knobs::{KnobCategory, KnobId, Knobs},
     meta::SoulRemembrance,
-    vision, Ai, AiKind, Direction, EquipSlot, Equipment, FloorTheme, Health, Inventory, Item,
+    vision, Ai, AiKind, Direction, EquipSlot, Equipment, FloorTheme, Food, Health, Inventory, Item,
     ItemKind, Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
@@ -153,6 +153,7 @@ impl App {
                 let mp_mul = (knobs.get(KnobId::MpStart) / 50.0).max(0.0);
                 Mana::new(((base as f32) * mp_mul).round().max(1.0) as i32)
             },
+            Food::new((knobs.get(KnobId::FoodStart).round().max(0.0)) as i32),
             Stats::new(10, 10, 8, 8, 10),
             Inventory::new(INVENTORY_MAX),
             Equipment::new(),
@@ -613,7 +614,15 @@ impl App {
         let locale = self.locale;
         let gold = self.gold;
         let seed_save = self.seed;
+        let current_food = self
+            .world
+            .get::<&Food>(self.player)
+            .map(|f| f.current)
+            .unwrap_or(Food::DEFAULT_MAX);
         *self = App::new_at_with(seed_save, next_floor, knobs, rem, locale, gold);
+        if let Ok(mut f) = self.world.get::<&mut Food>(self.player) {
+            f.current = current_food.saturating_sub(1);
+        }
         self.log(msg);
         true
     }
@@ -927,6 +936,9 @@ impl App {
         // from the counter-attack therefore never triggered
         // `game_over`. Fix the path so any HP=0 transition
         // fires on_player_death exactly once.
+        // v0.6.3: starvation tick runs first so the death check
+        // below observes the HP loss in the same tick.
+        self.apply_starvation();
         let player_dead = self
             .world
             .get::<&Health>(self.player)
@@ -1641,6 +1653,7 @@ impl App {
                     | KnobId::MonsterDensity
                     | KnobId::GoldDensity
                     | KnobId::MaxFloors
+                    | KnobId::FoodStart
             ) {
                 normal_style
             } else {
@@ -1673,6 +1686,23 @@ impl App {
     /// ceiling. Falls back to 8 if the knob is out of range or zero; the
     /// minimum is 1 (an out-of-range read can clamp down to 0, which we
     /// never want -- an infinite descent makes no sense).
+    /// v0.6.3: apply one tick of starvation damage. Called from
+    /// `enemy_take_turns` so the same-tick death check observes the
+    /// HP loss. No-op when food > 0.
+    fn apply_starvation(&mut self) {
+        let starving = self
+            .world
+            .get::<&Food>(self.player)
+            .map(|f| f.is_starving())
+            .unwrap_or(false);
+        if !starving {
+            return;
+        }
+        if let Ok(mut h) = self.world.get::<&mut Health>(self.player) {
+            h.take(1);
+        }
+    }
+
     fn effective_max_floors(&self) -> u32 {
         let raw = self.remembrance.knobs.get(KnobId::MaxFloors);
         let (lo, hi) = Knobs::range_of(KnobId::MaxFloors);

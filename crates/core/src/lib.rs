@@ -3,10 +3,13 @@
 
 #![deny(rust_2018_idioms)]
 
+pub mod food;
 pub mod i18n;
 pub mod knobs;
 pub mod meta;
 pub mod vision;
+
+pub use food::Food;
 
 use serde::{Deserialize, Serialize};
 

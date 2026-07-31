@@ -110,7 +110,7 @@ asciirogue/
 | `R` | 전체 슬라이더 기본값으로 리셋 |
 | `Esc` / `q` / `k` / `K` | 모달 닫기 |
 
-v0.6.1에서 **10개 슬라이더**가 실제 게임 룰에 반영됩니다 (나머지 6개는 UI 표시만, v0.6.2 이후 시스템 도입 시 연동 예정):
+v0.6.3에서 **11개 슬라이더**가 실제 게임 룰에 반영됩니다 (나머지 5개는 UI 표시만, 후속 사이클에서 시스템 도입 시 연동 예정):
 
 - **`vision.range` (시야)** — 플레이어 Viewshed::new의 range에 적용
 - **`enemy.hp_mul` (적 HP)** — 적 Health::new 값에 곱
@@ -122,6 +122,7 @@ v0.6.1에서 **10개 슬라이더**가 실제 게임 룰에 반영됩니다 (나
 - **`enemy.speed_mul` (적 속도)** — 적 AI 속도에 적용
 - **`scaling.floor` (층 스케일링)** — 층별 적 스케일에 적용
 - **`gold.density` (골드 밀도)** — 골드 드롭량에 적용
+- **`food.start` (시작 식량)** — 플레이어 시작 식량(`Food::new(knob)`)에 적용. 매 층 진입 시 1 감소, 0 도달 시 매 턴 HP 1 감소. 카테고리 `[W]` 월드.
 
 ### 노브 카테고리 (v0.6.2+)
 
@@ -129,10 +130,10 @@ v0.6.1에서 **10개 슬라이더**가 실제 게임 룰에 반영됩니다 (나
 
 - **`[P]` (Green)** — 플레이어 (시작 HP/MP, 시야): `hp.start`, `mp.start`, `vision.range`
 - **`[E]` (Red)** — 적 (속도/HP/공격/밀도): `enemy.speed_mul`, `enemy.hp_mul`, `enemy.atk_mul`, `monster.density`
-- **`[W]` (Blue)** — 월드 (층 스케일/최대 층/드롭): `max_floors`, `scaling.floor`, `gold.density`
+- **`[W]` (Blue)** — 월드 (층 스케일/최대 층/드롭, 식량): `max_floors`, `scaling.floor`, `gold.density`, `food.start`
 - **`[A]` (Magenta)** — 자동 (§19 Auto-Pilot, v0.6.2 기준 UI 만): `autopilot.mode`, `autopilot.speed`
 
-나머지 6개 (`food.start`, `autopilot.mode`, `autopilot.speed`, `pacing.recovery`, `relic.density`, `trap.density`)는 슬라이더가 표시되고 조작도 가능하지만 v0.6.1에서는 게임에 반영되지 않으며, v0.6.2 이후 시스템 도입 시 연동 예정입니다.
+나머지 5개 (`autopilot.mode`, `autopilot.speed`, `pacing.recovery`, `relic.density`, `trap.density`)는 슬라이더가 표시되고 조작도 가능하지만 v0.6.3에서는 게임에 반영되지 않으며, 후속 사이클에서 시스템 도입 시 연동 예정입니다.
 
 설정은 `SoulRemembrance.knobs` (RON, `#[serde(default)]`)에 자동 저장되어 다음 런에도 유지됩니다. 자세한 내용은 [`docs/SPEC.md`](docs/SPEC.md) §20 참고.
 

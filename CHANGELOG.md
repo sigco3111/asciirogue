@@ -78,6 +78,31 @@ Test totals: 122 passed (was 106; +16 new for v0.6.0).
 
 ## [Unreleased]
 
+### v0.6.3 — `food.start` 시스템 도입 (식량 + 굶주림)
+
+`FoodStart` 슬라이더를 UI-only 에서 실제 게임 룰로 wiring (11번째 wired 슬라이더). 플레이어는 시작 시 8 단위(default) 의 식량을 보유하고, 매 층 진입 시 1 씩 감소. 0 도달 시 매 턴 HP 1 감소 (배고픔). 음식 관련 item 드롭은 본 사이클 외.
+
+**Added**
+- 신규 `crates/core/src/food.rs` (21 LOC) — `pub struct Food { current, max }` + `pub const DEFAULT_MAX: i32 = 8` + `pub const fn new(value) -> Self` (음수 → 0 보정) + `pub fn consume(&mut self, by)` (saturating, `max` 불변) + `pub const fn is_starving(&self) -> bool`. `Food` 가 `current`/`max` 두 필드를 갖는 이유는 시작 최대량(`max`) 이 시작 식량 값에 고정되고, 진행 중에는 `current` 만 감소하기 때문 (HP/MP 와 동일 패턴).
+- `crates/core/src/lib.rs` 에 `pub mod food;` 모듈 선언 추가. `crates/app/src/lib.rs` / `crates/app/src/main.rs` 의 player `world.spawn((...))` 튜플에 `Food::new(knobs.get(KnobId::FoodStart).round().max(0.0) as i32)` 부착 → `FoodStart` knob 값이 절대 시작 식량량.
+
+**Wired (lib.rs + main.rs 동기화)**
+- `descend_internal` 의 성공 분기에서 `*self = App::new_at_with(...)` 호출 **전**에 OLD player `Food.current` 를 캡처, 호출 **후**에 `current = current_food.saturating_sub(1)` 으로 보존·감소. `max` 는 손대지 않음. 층 1→2→3: current 12→11→10, max 항상 12 (회귀 테스트 `food_floor_transition_decrements_by_one` 으로 고정).
+- `enemy_take_turns` 마지막에 신규 `apply_starvation()` 호출 → 그 직후 기존 `player_dead` 검사 (v0.5.28). 시퀀스가 중요한 이유: HP=1 + food=0 + 한 턴 소비 → 굶주림 1 HP 감소 (HP=0) → 같은 tick 안에서 death check 가 `on_player_death` 트리거 → `game_over = true` (회귀 테스트 `food_starvation_kills_same_tick_at_hp_one`).
+- 굶주림은 `enemy_take_turns` 안에 있으므로 자연스럽게 "턴을 소비한 입력" (wait/attack/walk) 에서만 발동. 벽 충돌 (`!is_passable { return; }`) 은 early return 이라 `enemy_take_turns` 미호출 → 식량도 굶주림도 발생하지 않음 (회귀 테스트 `food_wall_bump_does_not_consume_food` 가 out-of-bounds (0,-1) 가 Rock 임을 먼저 assert 한 뒤 Direction::Up 으로 bump → 식량 불변, 위치 불변 검증).
+- 노브 모달 `matches!` 에 `KnobId::FoodStart` 추가 → 모달이 `unwired_style` (DarkGray) 이 아닌 `normal_style` 로 렌더링.
+
+**Tests**: 134 → 141 통과 (0 실패). 7 개 신규 테스트:
+- `crates/core/src/lib.rs::tests`: `food_constructor_initial_state`, `food_consume_saturates_at_zero`
+- `crates/app/src/lib.rs::food_v063_tests`: `food_spawn_floor1_has_food_start_12`, `food_floor_transition_decrements_by_one`, `food_starvation_decrements_hp_per_wait_turn`, `food_starvation_kills_same_tick_at_hp_one`, `food_wall_bump_does_not_consume_food`
+
+**Docs**: README 의 "10 wired → 6 UI only" 를 "11 wired → 5 UI only" 로 갱신, `food.start` 항목을 wired 목록 + `[W]` 카테고리로 이동.
+**Version**: workspace.version 변경 없음 (0.6.2 유지 — 이번 사이클은 knob wiring 확장 + 신규 시스템 도입, 명시적 정책으로 release 시점에 일괄 bump).
+
+Test totals: 141 pass / 0 fail (was 134 pass / 0 fail; added 7 new for v0.6.3).
+
+---
+
 ### v0.5.28 — Fix: enemy-attack death path
 
 The v0.5.25 death handler never actually fired in real gameplay.

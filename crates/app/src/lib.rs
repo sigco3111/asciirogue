@@ -7,8 +7,8 @@ use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
     knobs::{KnobId, Knobs},
     meta::SoulRemembrance,
-    vision, Ai, AiKind, Direction, Equipment, FloorTheme, Health, Inventory, Item, ItemKind, Mana,
-    Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
+    vision, Ai, AiKind, Direction, Equipment, FloorTheme, Food, Health, Inventory, Item, ItemKind,
+    Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
 };
 use asciirogue_procgen::{bsp, Dungeon, Tile};
 use asciirogue_render::{draw_world, wall_glyph};
@@ -178,6 +178,7 @@ impl App {
                 let mp_mul = (knobs.get(KnobId::MpStart) / 50.0).max(0.0);
                 Mana::new(((base as f32) * mp_mul).round().max(1.0) as i32)
             },
+            Food::new((knobs.get(KnobId::FoodStart).round().max(0.0)) as i32),
             Stats::new(10, 10, 8, 8, 10),
             Inventory::new(INVENTORY_MAX),
             Equipment::new(),
@@ -599,7 +600,16 @@ impl App {
             let gold = self.gold;
             let seed_save = self.seed;
             let knobs = rem.knobs.clone();
+            // v0.6.3: preserve food on descent.
+            let current_food = self
+                .world
+                .get::<&Food>(self.player)
+                .map(|f| f.current)
+                .unwrap_or(Food::DEFAULT_MAX);
             *self = App::new_at_with(seed_save, next_floor, knobs, rem, locale, gold);
+            if let Ok(mut f) = self.world.get::<&mut Food>(self.player) {
+                f.current = current_food.saturating_sub(1);
+            }
             self.log(msg);
             true
         }
@@ -852,6 +862,9 @@ impl App {
         // from the counter-attack therefore never triggered
         // `game_over`. Fix the path so any HP=0 transition
         // fires on_player_death exactly once.
+        // v0.6.3: starvation tick runs first so the death check
+        // below observes the HP loss in the same tick.
+        self.apply_starvation();
         let player_dead = self
             .world
             .get::<&Health>(self.player)
@@ -1238,6 +1251,7 @@ impl App {
                     | KnobId::MonsterDensity
                     | KnobId::GoldDensity
                     | KnobId::MaxFloors
+                    | KnobId::FoodStart
             ) {
                 normal_style
             } else {
@@ -1265,6 +1279,32 @@ impl App {
         let hint_p = Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray)))
             .wrap(Wrap { trim: true });
         frame.render_widget(hint_p, chunks[KnobId::COUNT]);
+    }
+
+    /// v0.6.3: apply one tick of starvation damage. Called from
+    /// `enemy_take_turns` so the same-tick death check observes the
+    /// HP loss. No-op when food > 0.
+    fn apply_starvation(&mut self) {
+        let starving = self
+            .world
+            .get::<&Food>(self.player)
+            .map(|f| f.is_starving())
+            .unwrap_or(false);
+        if !starving {
+            return;
+        }
+        if let Ok(mut h) = self.world.get::<&mut Health>(self.player) {
+            h.take(1);
+        }
+    }
+
+    /// v0.6.3: test seam for `descend_internal`. Exposed so integration
+    /// tests can drive a floor transition without driving the entire input
+    /// loop. Production code calls `descend_internal` directly.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn descend_internal_for_tests(&mut self) -> bool {
+        self.descend_internal()
     }
 
     /// v0.6.0: replace the legacy `MAX_FLOORS` const with a knob-driven
@@ -3611,7 +3651,11 @@ mod food_v063_tests {
 
     #[test]
     fn food_spawn_floor1_has_food_start_12() {
-        let app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs
+            .set(asciirogue_core::knobs::KnobId::FoodStart, 12.0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
         let f = app
             .world
             .get::<&Food>(app.player)
@@ -3622,16 +3666,38 @@ mod food_v063_tests {
 
     #[test]
     fn food_floor_transition_decrements_by_one() {
+        use asciirogue_core::knobs::KnobId;
         let seed = 0xCAFE_BABE_DEAD_BEEF;
-        let app1 = App::new_at(seed, 1);
-        let app2 = App::new_at(seed, 2);
-        let app3 = App::new_at(seed, 3);
+        let build = || -> App {
+            let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+            rem.knobs.set(KnobId::FoodStart, 12.0);
+            let knobs = rem.knobs.clone();
+            App::new_at_with(seed, 1, knobs, rem, Locale::Korean, 0)
+        };
+        let mut app1 = build();
+        let mut app2 = build();
+        app2.descend_internal_for_tests();
+        let mut app3 = build();
+        app3.descend_internal_for_tests();
+        app3.descend_internal_for_tests();
         let f1 = app1.world.get::<&Food>(app1.player).unwrap();
         let f2 = app2.world.get::<&Food>(app2.player).unwrap();
         let f3 = app3.world.get::<&Food>(app3.player).unwrap();
-        assert_eq!((f1.current, f1.max), (12, 12), "floor 1: current=12, max=12");
-        assert_eq!((f2.current, f2.max), (11, 12), "floor 2: current=11, max=12");
-        assert_eq!((f3.current, f3.max), (10, 12), "floor 3: current=10, max=12");
+        assert_eq!(
+            (f1.current, f1.max),
+            (12, 12),
+            "floor 1: current=12, max=12"
+        );
+        assert_eq!(
+            (f2.current, f2.max),
+            (11, 12),
+            "floor 2: current=11, max=12"
+        );
+        assert_eq!(
+            (f3.current, f3.max),
+            (10, 12),
+            "floor 3: current=10, max=12"
+        );
     }
 
     #[test]
@@ -3639,7 +3705,10 @@ mod food_v063_tests {
         let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
         app.world.get::<&mut Food>(app.player).unwrap().current = 0;
         let hp_before = app.world.get::<&Health>(app.player).unwrap().current;
-        assert!(hp_before >= 2, "test premise: HP must be > 1 to observe a non-lethal starvation tick");
+        assert!(
+            hp_before >= 2,
+            "test premise: HP must be > 1 to observe a non-lethal starvation tick"
+        );
         app.try_player_act(Direction::None);
         let hp_after = app.world.get::<&Health>(app.player).unwrap().current;
         assert_eq!(
@@ -3667,7 +3736,11 @@ mod food_v063_tests {
 
     #[test]
     fn food_wall_bump_does_not_consume_food() {
-        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::FoodStart, 12.0);
+        let knobs = rem.knobs.clone();
+        let mut app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
         {
             let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
             pos.0 = TilePos(0, 0);
@@ -3682,11 +3755,17 @@ mod food_v063_tests {
             .get::<&Food>(app.player)
             .expect("player must carry Food component")
             .current;
-        assert_eq!(food_before, 12, "spawn food should be 12 for the bump test to be meaningful");
+        assert_eq!(
+            food_before, 12,
+            "spawn food should be 12 for the bump test to be meaningful"
+        );
         app.try_player_act(Direction::Up);
         let player_after = app.world.get::<&Position>(app.player).unwrap().0;
         let food_after = app.world.get::<&Food>(app.player).unwrap().current;
-        assert_eq!(player_before, player_after, "wall bump must not move player");
+        assert_eq!(
+            player_before, player_after,
+            "wall bump must not move player"
+        );
         assert_eq!(
             food_before, food_after,
             "wall bump must not consume food (no turn consumed)"

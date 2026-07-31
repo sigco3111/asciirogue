@@ -3,6 +3,24 @@
 All notable changes to asciirogue are documented here. Versions follow
 [SemVer](https://semver.org/) loosely — pre-1.0 we bump on milestone.
 
+## v0.6.2 — Knob 폴리시: NaN/±∞ 클램프 + 카테고리 배지
+
+v0.6.0/v0.6.1 에서 추가되었던 16-knob 시스템에 두 가지 폴리시 적용.
+
+**Fixed**
+- `Knobs::clamp()` 가 `f32::clamp(lo, hi)` 를 사용하여 NaN 이 전파되던 버그. IEEE 754 시맨틱 (`f32::max` / `f32::min` 체인) 으로 교체하여 NaN → lo, +∞ → hi, -∞ → lo 로 정규화. 기존 sibling `set_clamped()` 와 동작 일치.
+- 회귀 테스트 3 개: `clamp_coerces_nan_to_range_min`, `clamp_coerces_positive_infinity_to_range_max`, `clamp_coerces_negative_infinity_to_range_min`.
+
+**Added**
+- `KnobCategory` enum (4 가지: Player/Enemy/World/Auto) + `KNOB_CATEGORY` const (16 개 항목, `KnobId` 선언 순서대로) + `KnobId::category()` 메서드 — 모달 렌더러의 카테고리 분류 기반.
+- 모달에 카테고리 배지 prefix 추가: `[P]/[E]/[W]/[A]` (각각 Green/Red/Blue/Magenta 색상, Bold). 슬라이더 한 줄 모양: `[P]  1. 시작 HP      100.00 (def 100.00,  20.00..200.00)`. 슬라이더가 어느 게임 영역에 영향을 주는지 즉시 판독 가능.
+- v0.6.1 에서 wiring 이 늘어난 5 개 슬라이더 (`hp.start`, `mp.start`, `enemy.speed_mul`, `scaling.floor`, `gold.density`) 가 unwired style (DarkGray) 로 잘못 렌더링되던 stale `matches!` 분기를 10 wired 슬라이더 전체로 확장.
+- 카테고리 매핑 회귀 테스트: `category_mapping_matches_grouping_spec`.
+
+**Tests**: 130 → 134 통과 (0 실패), lib.rs 의 modal 변경은 컴파일만 검증 (모달 자체에는 테스트 안 둠).
+**Docs**: README 에 "노브 카테고리 (v0.6.2+)" 섹션 추가.
+**Version**: workspace.version `0.6.1` → `0.6.2`.
+
 ## v0.6.1 — Knob 모달리티 추가 wiring (SPEC §20)
 
 v0.6.0에서 16개 슬라이더 중 5개만 wiring되어 있던 상태에서, **5개를 더** wiring하여 총 10개가 게임에 반영됩니다.

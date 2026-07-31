@@ -28,7 +28,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asciirogue"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "asciirogue-combat",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "asciirogue-combat"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "asciirogue-core",
  "serde",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "asciirogue-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "doryen-fov",
  "hecs",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "asciirogue-procgen"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "asciirogue-core",
  "asciirogue-render",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "asciirogue-render"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "asciirogue-core",
  "asciirogue-procgen",

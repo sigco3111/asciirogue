@@ -123,6 +123,15 @@ v0.6.1에서 **10개 슬라이더**가 실제 게임 룰에 반영됩니다 (나
 - **`scaling.floor` (층 스케일링)** — 층별 적 스케일에 적용
 - **`gold.density` (골드 밀도)** — 골드 드롭량에 적용
 
+### 노브 카테고리 (v0.6.2+)
+
+모달 안 16 개 슬라이더 각각에 카테고리 배지가 붙어 어느 영역에 영향을 주는지 한눈에 보입니다:
+
+- **`[P]` (Green)** — 플레이어 (시작 HP/MP, 시야): `hp.start`, `mp.start`, `vision.range`
+- **`[E]` (Red)** — 적 (속도/HP/공격/밀도): `enemy.speed_mul`, `enemy.hp_mul`, `enemy.atk_mul`, `monster.density`
+- **`[W]` (Blue)** — 월드 (층 스케일/최대 층/드롭): `max_floors`, `scaling.floor`, `gold.density`
+- **`[A]` (Magenta)** — 자동 (§19 Auto-Pilot, v0.6.2 기준 UI 만): `autopilot.mode`, `autopilot.speed`
+
 나머지 6개 (`food.start`, `autopilot.mode`, `autopilot.speed`, `pacing.recovery`, `relic.density`, `trap.density`)는 슬라이더가 표시되고 조작도 가능하지만 v0.6.1에서는 게임에 반영되지 않으며, v0.6.2 이후 시스템 도입 시 연동 예정입니다.
 
 설정은 `SoulRemembrance.knobs` (RON, `#[serde(default)]`)에 자동 저장되어 다음 런에도 유지됩니다. 자세한 내용은 [`docs/SPEC.md`](docs/SPEC.md) §20 참고.

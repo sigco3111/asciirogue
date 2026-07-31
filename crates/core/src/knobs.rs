@@ -76,6 +76,15 @@ impl KnobId {
             _ => None,
         }
     }
+
+    /// Coarse grouping for modal badge rendering.
+    pub fn category(self) -> KnobCategory {
+        KNOB_CATEGORY
+            .iter()
+            .find(|(k, _)| *k == self)
+            .map(|(_, c)| *c)
+            .unwrap_or(KnobCategory::World) // unreachable — Self ∈ KNOB_CATEGORY
+    }
 }
 
 /// Display label (Korean-first) for each knob (SPEC §20 + UX-facing `max_floors`).
@@ -142,6 +151,42 @@ pub const KNOB_DEFAULT: [(KnobId, f32); KnobId::COUNT] = [
     (KnobId::MonsterDensity, 1.0),
     (KnobId::TrapDensity, 1.0),
     (KnobId::MaxFloors, 8.0),
+];
+
+/// v0.6.2: coarse grouping for the modal renderer. Each `KnobId` falls into
+/// exactly one of four buckets. Display uses this in `draw_knobs_modal`
+/// as `[P]`/`[E]`/`[W]`/`[A]` colored badges.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum KnobCategory {
+    /// 플레이어 (player starting state)
+    Player,
+    /// 적 (enemy stats / spawn density)
+    Enemy,
+    /// 월드 (per-floor scaling, run length, drop density)
+    World,
+    /// Auto-Pilot placeholder (§19 — wired in v0.6.0 only as UI)
+    Auto,
+}
+
+/// Category assignment for each `KnobId`, in declaration order. Single source
+/// of truth — read via `KnobId::category(self)`.
+pub const KNOB_CATEGORY: [(KnobId, KnobCategory); KnobId::COUNT] = [
+    (KnobId::HpStart, KnobCategory::Player),
+    (KnobId::MpStart, KnobCategory::Player),
+    (KnobId::FoodStart, KnobCategory::World),
+    (KnobId::EnemySpeedMul, KnobCategory::Enemy),
+    (KnobId::EnemyHpMul, KnobCategory::Enemy),
+    (KnobId::EnemyAtkMul, KnobCategory::Enemy),
+    (KnobId::VisionRange, KnobCategory::Player),
+    (KnobId::ScalingFloor, KnobCategory::World),
+    (KnobId::AutopilotMode, KnobCategory::Auto),
+    (KnobId::AutopilotSpeed, KnobCategory::Auto),
+    (KnobId::PacingRecovery, KnobCategory::Auto),
+    (KnobId::RelicDensity, KnobCategory::Auto),
+    (KnobId::GoldDensity, KnobCategory::World),
+    (KnobId::MonsterDensity, KnobCategory::Enemy),
+    (KnobId::TrapDensity, KnobCategory::World),
+    (KnobId::MaxFloors, KnobCategory::World),
 ];
 
 fn default_for(id: KnobId) -> f32 {
@@ -338,7 +383,7 @@ impl Knobs {
         for (id, _, _, _) in KNOB_STEP.iter().copied() {
             let v = self.get(id);
             let (lo, hi) = range_for(id);
-            let clamped = v.clamp(lo, hi);
+            let clamped = v.max(lo).min(hi);
             self.set(id, clamped);
         }
     }
@@ -380,7 +425,7 @@ impl Knobs {
 
 #[cfg(test)]
 mod tests {
-    use crate::knobs::{KnobId, Knobs};
+    use crate::knobs::{KnobCategory, KnobId, Knobs, KNOB_CATEGORY};
 
     // ─── 1. Defaults match SPEC §20 exactly (15 SPEC knobs + max_floors=8) ─────
 
@@ -487,6 +532,62 @@ mod tests {
         assert_eq!(k.get(KnobId::MonsterDensity), 2.0, "monster_density max");
         assert_eq!(k.get(KnobId::TrapDensity), 2.0, "trap_density max");
         assert_eq!(k.get(KnobId::MaxFloors), 20.0, "max_floors max");
+    }
+
+    #[test]
+    fn clamp_coerces_nan_to_range_min() {
+        use std::f32;
+        let mut k = Knobs::default();
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap();
+            k.set(id, f32::NAN);
+        }
+        k.clamp();
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap();
+            let v = k.get(id);
+            assert!(
+                !v.is_nan(),
+                "id={:?} expected non-NaN after clamp, got NaN",
+                id
+            );
+            let (lo, _hi) = Knobs::range_of(id);
+            assert_eq!(v, lo, "id={:?} expected NaN→lo (={}), got {}", id, lo, v);
+        }
+    }
+
+    #[test]
+    fn clamp_coerces_positive_infinity_to_range_max() {
+        use std::f32;
+        let mut k = Knobs::default();
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap();
+            k.set(id, f32::INFINITY);
+        }
+        k.clamp();
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap();
+            let v = k.get(id);
+            let (_lo, hi) = Knobs::range_of(id);
+            assert_eq!(v, hi, "id={:?} expected +∞→hi (={}), got {}", id, hi, v);
+        }
+    }
+
+    #[test]
+    fn clamp_coerces_negative_infinity_to_range_min() {
+        use std::f32;
+        let mut k = Knobs::default();
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap();
+            k.set(id, f32::NEG_INFINITY);
+        }
+        k.clamp();
+        for i in 0..KnobId::COUNT {
+            let id = KnobId::from_index(i).unwrap();
+            let v = k.get(id);
+            let (lo, _hi) = Knobs::range_of(id);
+            assert_eq!(v, lo, "id={:?} expected -∞→lo (={}), got {}", id, lo, v);
+        }
     }
 
     // ─── 3. RON serde round-trip preserves all fields ──────────────────────────
@@ -626,5 +727,32 @@ mod tests {
         k.reset();
 
         assert_eq!(k, Knobs::default(), "reset() must restore every field");
+    }
+
+    #[test]
+    fn category_mapping_matches_grouping_spec() {
+        use KnobCategory::*;
+        let expected: &[(KnobId, KnobCategory)] = &[
+            (KnobId::HpStart, Player),
+            (KnobId::MpStart, Player),
+            (KnobId::FoodStart, World),
+            (KnobId::EnemySpeedMul, Enemy),
+            (KnobId::EnemyHpMul, Enemy),
+            (KnobId::EnemyAtkMul, Enemy),
+            (KnobId::VisionRange, Player),
+            (KnobId::ScalingFloor, World),
+            (KnobId::AutopilotMode, Auto),
+            (KnobId::AutopilotSpeed, Auto),
+            (KnobId::PacingRecovery, Auto),
+            (KnobId::RelicDensity, Auto),
+            (KnobId::GoldDensity, World),
+            (KnobId::MonsterDensity, Enemy),
+            (KnobId::TrapDensity, World),
+            (KnobId::MaxFloors, World),
+        ];
+        assert_eq!(KNOB_CATEGORY.len(), expected.len());
+        for (i, (id, cat)) in expected.iter().enumerate() {
+            assert_eq!(id.category(), *cat, "id at index {} should be {:?}", i, cat);
+        }
     }
 }

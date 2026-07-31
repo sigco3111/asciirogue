@@ -8,7 +8,7 @@ use asciirogue::{
 use asciirogue_combat::{ai, attack};
 use asciirogue_core::{
     i18n::{self, Key as I18nKey, Locale},
-    knobs::{KnobId, Knobs},
+    knobs::{KnobCategory, KnobId, Knobs},
     meta::SoulRemembrance,
     vision, Ai, AiKind, Direction, EquipSlot, Equipment, FloorTheme, Health, Inventory, Item,
     ItemKind, Mana, Name, Player, Position, Renderable, Stats, TilePos, Viewshed,
@@ -1601,6 +1601,17 @@ impl App {
         let unwired_style = Style::default().fg(Color::DarkGray);
         let normal_style = Style::default();
 
+        let cat_style_player = Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD);
+        let cat_style_enemy = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let cat_style_world = Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD);
+        let cat_style_auto = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD);
+
         for i in 0..KnobId::COUNT {
             let id = KnobId::from_index(i).unwrap(); // COUNT is the bound, so always Some
             let label = Knobs::label_of(id);
@@ -1616,22 +1627,37 @@ impl App {
                 lo,
                 hi,
             );
-            let style = if i == cursor {
+            let body_style = if i == cursor {
                 cursor_style
             } else if matches!(
                 id,
-                KnobId::VisionRange
+                KnobId::HpStart
+                    | KnobId::MpStart
+                    | KnobId::VisionRange
+                    | KnobId::EnemySpeedMul
                     | KnobId::EnemyHpMul
                     | KnobId::EnemyAtkMul
+                    | KnobId::ScalingFloor
                     | KnobId::MonsterDensity
+                    | KnobId::GoldDensity
                     | KnobId::MaxFloors
             ) {
                 normal_style
             } else {
                 unwired_style
             };
-            let p = Paragraph::new(Span::styled(text, style));
-            frame.render_widget(p, chunks[i]);
+            let badge = match id.category() {
+                KnobCategory::Player => ("[P]", cat_style_player),
+                KnobCategory::Enemy => ("[E]", cat_style_enemy),
+                KnobCategory::World => ("[W]", cat_style_world),
+                KnobCategory::Auto => ("[A]", cat_style_auto),
+            };
+            let line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(badge.0, badge.1),
+                ratatui::text::Span::raw(" "),
+                ratatui::text::Span::styled(text, body_style),
+            ]);
+            frame.render_widget(Paragraph::new(line), chunks[i]);
         }
 
         let hint = match self.locale {

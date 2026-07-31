@@ -1156,10 +1156,10 @@ impl App {
         area: ratatui::layout::Rect,
         cursor: usize,
     ) {
-        use asciirogue_core::knobs::{KnobId, Knobs};
+        use asciirogue_core::knobs::{KnobCategory, KnobId, Knobs};
         use ratatui::layout::{Constraint, Direction, Layout, Margin};
         use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::{Line, Span};
+        use ratatui::text::Span;
         use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
         // Centered 60×18 modal — matches inventory modal footprint.
@@ -1195,8 +1195,21 @@ impl App {
         let unwired_style = Style::default().fg(Color::DarkGray);
         let normal_style = Style::default();
 
+        // v0.6.2: 4 category colors for the leading [P]/[E]/[W]/[A] badge.
+        // Player=Green, Enemy=Red, World=Blue, Auto=Magenta.
+        let cat_style_player = Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD);
+        let cat_style_enemy = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let cat_style_world = Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD);
+        let cat_style_auto = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD);
+
         for i in 0..KnobId::COUNT {
-            let id = KnobId::from_index(i).unwrap(); // COUNT is the bound, so always Some
+            let id = KnobId::from_index(i).unwrap();
             let label = Knobs::label_of(id);
             let value = self.remembrance.knobs.get(id);
             let (lo, hi) = Knobs::range_of(id);
@@ -1210,22 +1223,39 @@ impl App {
                 lo,
                 hi,
             );
-            let style = if i == cursor {
+            // v0.6.2: pick body style the same way (cursor > wired > unwired).
+            let body_style = if i == cursor {
                 cursor_style
             } else if matches!(
                 id,
-                KnobId::VisionRange
+                KnobId::HpStart
+                    | KnobId::MpStart
+                    | KnobId::VisionRange
+                    | KnobId::EnemySpeedMul
                     | KnobId::EnemyHpMul
                     | KnobId::EnemyAtkMul
+                    | KnobId::ScalingFloor
                     | KnobId::MonsterDensity
+                    | KnobId::GoldDensity
                     | KnobId::MaxFloors
             ) {
                 normal_style
             } else {
                 unwired_style
             };
-            let p = Paragraph::new(Span::styled(text, style));
-            frame.render_widget(p, chunks[i]);
+            // v0.6.2: 3-Span line — leading category badge, body, trailing space.
+            let badge = match id.category() {
+                KnobCategory::Player => ("[P]", cat_style_player),
+                KnobCategory::Enemy => ("[E]", cat_style_enemy),
+                KnobCategory::World => ("[W]", cat_style_world),
+                KnobCategory::Auto => ("[A]", cat_style_auto),
+            };
+            let line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(badge.0, badge.1),
+                ratatui::text::Span::raw(" "),
+                ratatui::text::Span::styled(text, body_style),
+            ]);
+            frame.render_widget(Paragraph::new(line), chunks[i]);
         }
 
         let hint = match self.locale {

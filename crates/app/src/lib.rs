@@ -3603,3 +3603,93 @@ mod knob_tests {
         panic!("no gold ($) found on floor 1");
     }
 }
+
+#[cfg(test)]
+mod food_v063_tests {
+    use super::*;
+    use asciirogue_core::{Food, Health, Position};
+
+    #[test]
+    fn food_spawn_floor1_has_food_start_12() {
+        let app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        let f = app
+            .world
+            .get::<&Food>(app.player)
+            .expect("player must carry Food component after spawn");
+        assert_eq!(f.current, 12, "FoodStart must be 12 on floor 1");
+        assert_eq!(f.max, 12, "Food.max must equal FoodStart");
+    }
+
+    #[test]
+    fn food_floor_transition_decrements_by_one() {
+        let seed = 0xCAFE_BABE_DEAD_BEEF;
+        let app1 = App::new_at(seed, 1);
+        let app2 = App::new_at(seed, 2);
+        let app3 = App::new_at(seed, 3);
+        let f1 = app1.world.get::<&Food>(app1.player).unwrap();
+        let f2 = app2.world.get::<&Food>(app2.player).unwrap();
+        let f3 = app3.world.get::<&Food>(app3.player).unwrap();
+        assert_eq!((f1.current, f1.max), (12, 12), "floor 1: current=12, max=12");
+        assert_eq!((f2.current, f2.max), (11, 12), "floor 2: current=11, max=12");
+        assert_eq!((f3.current, f3.max), (10, 12), "floor 3: current=10, max=12");
+    }
+
+    #[test]
+    fn food_starvation_decrements_hp_per_wait_turn() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        app.world.get::<&mut Food>(app.player).unwrap().current = 0;
+        let hp_before = app.world.get::<&Health>(app.player).unwrap().current;
+        assert!(hp_before >= 2, "test premise: HP must be > 1 to observe a non-lethal starvation tick");
+        app.try_player_act(Direction::None);
+        let hp_after = app.world.get::<&Health>(app.player).unwrap().current;
+        assert_eq!(
+            hp_after,
+            hp_before - 1,
+            "one consumed wait turn with food=0 must drop HP by exactly 1"
+        );
+        assert!(
+            !app.game_over,
+            "single starvation tick at HP>1 must not yet trigger game_over"
+        );
+    }
+
+    #[test]
+    fn food_starvation_kills_same_tick_at_hp_one() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        app.world.get::<&mut Food>(app.player).unwrap().current = 0;
+        app.world.get::<&mut Health>(app.player).unwrap().current = 1;
+        app.try_player_act(Direction::None);
+        assert!(
+            app.game_over,
+            "starvation at HP=1 must trigger game_over same tick"
+        );
+    }
+
+    #[test]
+    fn food_wall_bump_does_not_consume_food() {
+        let mut app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        {
+            let mut pos = app.world.get::<&mut Position>(app.player).unwrap();
+            pos.0 = TilePos(0, 0);
+        }
+        assert!(
+            !is_passable(&app.dungeon, 0, -1),
+            "out-of-bounds (0,-1) must be impassable (Rock)"
+        );
+        let player_before = app.world.get::<&Position>(app.player).unwrap().0;
+        let food_before = app
+            .world
+            .get::<&Food>(app.player)
+            .expect("player must carry Food component")
+            .current;
+        assert_eq!(food_before, 12, "spawn food should be 12 for the bump test to be meaningful");
+        app.try_player_act(Direction::Up);
+        let player_after = app.world.get::<&Position>(app.player).unwrap().0;
+        let food_after = app.world.get::<&Food>(app.player).unwrap().current;
+        assert_eq!(player_before, player_after, "wall bump must not move player");
+        assert_eq!(
+            food_before, food_after,
+            "wall bump must not consume food (no turn consumed)"
+        );
+    }
+}

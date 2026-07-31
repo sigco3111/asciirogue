@@ -582,4 +582,22 @@ mod tests {
         assert_eq!(FloorTheme::from_depth(5), FloorTheme::Catacomb);
         assert_eq!(FloorTheme::from_depth(28), FloorTheme::Boss);
     }
+
+    #[test]
+    fn food_constructor_initial_state() {
+        let f = Food::new(12);
+        assert_eq!(f.current, 12, "Food::new(12).current must be 12");
+        assert_eq!(f.max, 12, "Food::new(12).max must be 12");
+    }
+
+    #[test]
+    fn food_consume_saturates_at_zero() {
+        let mut f = Food::new(2);
+        f.consume(5);
+        assert_eq!(
+            f.current, 0,
+            "consume must saturate at zero, never underflow"
+        );
+        assert_eq!(f.max, 2, "consume must not mutate max");
+    }
 }

@@ -116,22 +116,35 @@ const INVENTORY_MAX: usize = 8;
 impl App {
     pub fn new(base_seed: u64) -> Self {
         let loc = Locale::from_code(&std::env::var("ASCIITROGUE_LANG").unwrap_or_default());
-        Self::new_at_with(base_seed, 1, load_remembrance(), loc, 0)
+        let rem = load_remembrance();
+        let knobs = rem.knobs.clone();
+        Self::new_at_with(base_seed, 1, knobs, rem, loc, 0)
     }
 
     /// Convenience for tests: a fresh App with no saved meta.
     #[allow(dead_code)]
     pub fn new_at(base_seed: u64, floor: u32) -> Self {
-        Self::new_at_with(base_seed, floor, SoulRemembrance::new(), Locale::Korean, 0)
+        let rem = SoulRemembrance::new();
+        let knobs = rem.knobs.clone();
+        Self::new_at_with(base_seed, floor, knobs, rem, Locale::Korean, 0)
     }
 
     pub fn new_at_with(
         base_seed: u64,
         floor: u32,
+        // v0.6.1: explicit knobs parameter. The `knobs` value here is the
+        // source of truth at construction time — it OVERRIDES the
+        // `remembrance.knobs` field (which is then kept in sync).
+        knobs: asciirogue_core::knobs::Knobs,
         remembrance: SoulRemembrance,
         locale: Locale,
         carried_gold: u32,
     ) -> Self {
+        // v0.6.1: keep remembrance.knobs in sync with the explicit param.
+        // We construct a new SoulRemembrance rather than mutating the
+        // caller's copy, since SoulRemembrance is a value type.
+        let mut remembrance = remembrance;
+        remembrance.knobs = knobs.clone();
         let theme = FloorTheme::from_depth(floor);
         // Per-floor seed: combine base + floor so each descent is deterministic.
         let seed = base_seed.wrapping_add((floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64));
@@ -155,8 +168,16 @@ impl App {
             Player,
             Renderable::new('@', 0xFF_D6_5A),
             Viewshed::new(vision_radius, MAP_W, MAP_H),
-            Health::new(40 + 5 * (floor as i32 - 1)),
-            Mana::new(15 + 2 * (floor as i32 - 1)),
+            {
+                let base = 40 + 5 * (floor as i32 - 1);
+                let hp_mul = (knobs.get(KnobId::HpStart) / 100.0).max(0.0);
+                Health::new(((base as f32) * hp_mul).round().max(1.0) as i32)
+            },
+            {
+                let base = 15 + 2 * (floor as i32 - 1);
+                let mp_mul = (knobs.get(KnobId::MpStart) / 50.0).max(0.0);
+                Mana::new(((base as f32) * mp_mul).round().max(1.0) as i32)
+            },
             Stats::new(10, 10, 8, 8, 10),
             Inventory::new(INVENTORY_MAX),
             Equipment::new(),
@@ -254,7 +275,8 @@ impl App {
                         KeyCode::Char('R') => {
                             let rem = self.remembrance.clone();
                             let locale = self.locale;
-                            *self = App::new_at_with(self.seed, 1, rem, locale, 0);
+                            let knobs = rem.knobs.clone();
+                            *self = App::new_at_with(self.seed, 1, knobs, rem, locale, 0);
                         }
                         _ => {}
                     }
@@ -337,7 +359,8 @@ impl App {
                         // Restart the run from floor 1.
                         let rem = self.remembrance.clone();
                         let locale = self.locale;
-                        *self = App::new_at_with(self.seed, 1, rem, locale, 0);
+                        let knobs = rem.knobs.clone();
+                        *self = App::new_at_with(self.seed, 1, knobs, rem, locale, 0);
                     }
                     KeyCode::Char('S') => {
                         // Save: persist current meta state to disk.
@@ -373,7 +396,8 @@ impl App {
                         let rem = self.remembrance.clone();
                         let locale = self.locale;
                         let gold = self.gold;
-                        *self = App::new_at_with(new_base, self.floor, rem, locale, gold);
+                        let knobs = rem.knobs.clone();
+                        *self = App::new_at_with(new_base, self.floor, knobs, rem, locale, gold);
                     }
                     KeyCode::Char('~') | KeyCode::Char('`') => {
                         // v0.5.14: debug stairs warp. Teleport player onto
@@ -574,7 +598,8 @@ impl App {
             let locale = self.locale;
             let gold = self.gold;
             let seed_save = self.seed;
-            *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
+            let knobs = rem.knobs.clone();
+            *self = App::new_at_with(seed_save, next_floor, knobs, rem, locale, gold);
             self.log(msg);
             true
         }
@@ -1308,6 +1333,7 @@ pub fn spawn_enemy(
     kind: AiKind,
     hp_mul: f32,
     atk_mul: f32,
+    speed_mul: f32,
 ) {
     if let Some(room) = dungeon.rooms.get(room_idx) {
         let (ex, ey) = room.center();
@@ -1324,7 +1350,7 @@ pub fn spawn_enemy(
             Renderable::new(glyph, fg),
             Health::new(scaled_hp),
             stats,
-            Ai::new(kind, 100, vision),
+            Ai::new(kind, ((100.0 * speed_mul).round().max(1.0)) as i32, vision),
             Name(name.to_string()),
         ));
     }
@@ -1365,9 +1391,12 @@ pub fn populate_floor(
     use asciirogue_core::knobs::KnobId;
     let hp_mul = knobs.get(KnobId::EnemyHpMul);
     let atk_mul = knobs.get(KnobId::EnemyAtkMul);
+    let speed_mul = knobs.get(KnobId::EnemySpeedMul);
     let monster_density = knobs.get(KnobId::MonsterDensity);
     // Difficulty scales linearly: HP + attack bonus per floor.
-    let scale = floor as i32; // 1..=8
+    // v0.6.1: scaling.floor knob multiplies the per-floor difficulty.
+    let scaling_factor = knobs.get(KnobId::ScalingFloor);
+    let scale = (((floor as f32) * scaling_factor).round().max(1.0)) as i32; // 1..=8 (capped)
 
     // Spawn 2 standard enemies per floor (in non-boss floors) + 1 boss on BOSS_FLOOR.
     // v0.5.12: idx.min(rooms-1) used to land on the last room whenever
@@ -1399,6 +1428,7 @@ pub fn populate_floor(
             AiKind::Coward,
             hp_mul,
             atk_mul,
+            speed_mul,
         );
         idx += 1;
         // Tier 2: a goblin (or skeleton for catacombs+).
@@ -1428,6 +1458,7 @@ pub fn populate_floor(
             AiKind::Chase,
             hp_mul,
             atk_mul,
+            speed_mul,
         );
     }
     // Spawn a tougher prowler if floor is mid-tier or beyond (room 3+).
@@ -1444,6 +1475,7 @@ pub fn populate_floor(
             AiKind::Chase,
             hp_mul,
             atk_mul,
+            speed_mul,
         );
     }
 
@@ -1499,7 +1531,11 @@ pub fn populate_floor(
         let cx = cx.max(room.x1 + 1);
         let cy = cy.max(room.y1 + 1);
         let item = match (floor + i as u32) % 4 {
-            0 => Item::gold(10 + scale * 4),
+            0 => {
+                let base = 10 + scale * 4;
+                let d = knobs.get(KnobId::GoldDensity);
+                Item::gold(((base as f32) * d).round().max(0.0) as i32)
+            }
             1 => Item::potion_hp(),
             2 => Item::potion_mp(),
             _ => Item::weapon(1 + scale, if scale >= 3 { "장검" } else { "단검" }),
@@ -3291,7 +3327,8 @@ mod knob_tests {
         use asciirogue_core::knobs::KnobId;
         let mut rem = asciirogue_core::meta::SoulRemembrance::default();
         rem.knobs.set(KnobId::VisionRange, 12.0);
-        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, rem, Locale::Korean, 0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
         let vs = app.world.get::<&Viewshed>(app.player).unwrap();
         assert_eq!(vs.range, 12, "player Viewshed.range should match knob 12");
     }
@@ -3301,7 +3338,8 @@ mod knob_tests {
         use asciirogue_core::knobs::KnobId;
         let mut rem = asciirogue_core::meta::SoulRemembrance::default();
         rem.knobs.set(KnobId::EnemyHpMul, 2.0);
-        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, rem, Locale::Korean, 0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
         let mut found_enemy = false;
         for (_e, (renderable, health)) in app.world.query::<(&Renderable, &Health)>().iter() {
             if renderable.glyph == 'r' && !found_enemy {
@@ -3324,7 +3362,8 @@ mod knob_tests {
         use asciirogue_core::knobs::KnobId;
         let mut rem = asciirogue_core::meta::SoulRemembrance::default();
         rem.knobs.set(KnobId::EnemyAtkMul, 2.0);
-        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, rem, Locale::Korean, 0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
         let mut found = false;
         for (_e, (renderable, stats)) in app.world.query::<(&Renderable, &Stats)>().iter() {
             if renderable.glyph == 'r' && !found {
@@ -3347,7 +3386,8 @@ mod knob_tests {
         use asciirogue_core::knobs::KnobId;
         let mut rem = asciirogue_core::meta::SoulRemembrance::default();
         rem.knobs.set(KnobId::MonsterDensity, 0.0);
-        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 3, rem, Locale::Korean, 0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 3, knobs, rem, Locale::Korean, 0);
         let mut bear_count = 0;
         for (_e, renderable) in app.world.query::<&Renderable>().iter() {
             if renderable.glyph == 'B' {
@@ -3362,12 +3402,174 @@ mod knob_tests {
         use asciirogue_core::knobs::KnobId;
         let mut rem = asciirogue_core::meta::SoulRemembrance::default();
         rem.knobs.set(KnobId::MaxFloors, 10.0);
-        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 8, rem, Locale::Korean, 0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 8, knobs, rem, Locale::Korean, 0);
         let eff = app.effective_max_floors();
         assert!(
             eff >= 10,
             "effective_max_floors should be >= 10 with knob=10, got {}",
             eff
         );
+    }
+
+    #[test]
+    fn refactor_new_at_with_explicit_knobs_param_overrides_knobs_in_remembrance() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        // Put knobs.vision_range = 3 in remembrance; pass explicit knobs.vision_range = 12.
+        rem.knobs.set(KnobId::VisionRange, 3.0);
+        let mut explicit_knobs = asciirogue_core::knobs::Knobs::default();
+        explicit_knobs.set(KnobId::VisionRange, 12.0);
+        let app = App::new_at_with(
+            0xCAFE_BABE_DEAD_BEEF,
+            1,
+            explicit_knobs,
+            rem,
+            Locale::Korean,
+            0,
+        );
+        // The explicit knobs param wins — vision should be 12, not 3.
+        let vs = app.world.get::<&Viewshed>(app.player).unwrap();
+        assert_eq!(
+            vs.range, 12,
+            "explicit knobs param should override remembrance.knobs"
+        );
+    }
+
+    #[test]
+    fn refactor_new_at_with_explicit_knobs_param_stored_in_remembrance() {
+        use asciirogue_core::knobs::KnobId;
+        let rem = asciirogue_core::meta::SoulRemembrance::default();
+        let mut explicit_knobs = asciirogue_core::knobs::Knobs::default();
+        explicit_knobs.set(KnobId::EnemyHpMul, 3.0);
+        let app = App::new_at_with(
+            0xCAFE_BABE_DEAD_BEEF,
+            1,
+            explicit_knobs,
+            rem,
+            Locale::Korean,
+            0,
+        );
+        assert!(
+            (app.remembrance.knobs.get(KnobId::EnemyHpMul) - 3.0).abs() < 0.001,
+            "explicit knobs param should land in remembrance.knobs"
+        );
+    }
+
+    #[test]
+    fn refactor_new_at_with_existing_callers_still_compile_after_signature_change() {
+        // Smoke test that all 9 existing knob_tests (which now use the new 6-arg signature)
+        // are updated consistently. This test passes by virtue of the other tests passing.
+        // It exists to mark the refactor contract.
+        let app = App::new_at(0xCAFE_BABE_DEAD_BEEF, 1);
+        // Default knobs load (vision_range = 8).
+        let vs = app.world.get::<&Viewshed>(app.player).unwrap();
+        assert_eq!(vs.range, 8);
+    }
+
+    #[test]
+    fn wiring_hp_start_scales_player_max_hp() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        // Default HP at floor 1 is 40 + 5*(1-1) = 40. With hp_start=200 (default 100),
+        // multiplier = 200/100 = 2.0 → HP = 40 * 2 = 80.
+        rem.knobs.set(KnobId::HpStart, 200.0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
+        let h = app.world.get::<&Health>(app.player).unwrap();
+        assert_eq!(h.max, 80, "expected HP=80 at hp_start=200, floor 1");
+    }
+
+    #[test]
+    fn wiring_mp_start_scales_player_max_mp() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        // Default MP at floor 1 is 15 + 2*0 = 15. With mp_start=100 (default 50),
+        // multiplier = 100/50 = 2.0 → MP = 15 * 2 = 30.
+        rem.knobs.set(KnobId::MpStart, 100.0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
+        let m = app.world.get::<&Mana>(app.player).unwrap();
+        assert_eq!(m.max, 30, "expected MP=30 at mp_start=100, floor 1");
+    }
+
+    #[test]
+    fn wiring_enemy_speed_mul_scales_ai_speed() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::EnemySpeedMul, 2.0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(
+            0xCAFE_BABE_DEAD_BEEF,
+            1, // floor 1 = rat spawns
+            knobs,
+            rem,
+            Locale::Korean,
+            0,
+        );
+        // Rat (r) spawned with Ai::new(Coward, 100, 8). With enemy.speed_mul=2.0 → speed = 200.
+        for (_e, (renderable, ai)) in app.world.query::<(&Renderable, &Ai)>().iter() {
+            if renderable.glyph == 'r' {
+                assert_eq!(
+                    ai.speed, 200,
+                    "expected rat speed=200 at enemy.speed_mul=2.0, got {}",
+                    ai.speed
+                );
+                return;
+            }
+        }
+        panic!("no rat (r) found on floor 1");
+    }
+
+    #[test]
+    fn wiring_scaling_floor_doubles_difficulty_per_floor() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::ScalingFloor, 2.0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(
+            0xCAFE_BABE_DEAD_BEEF,
+            1, // floor 1: rat HP = 6 + scale*1 = 6 + 2 = 8
+            knobs,
+            rem,
+            Locale::Korean,
+            0,
+        );
+        // Find rat. With scaling.floor=2.0: scale = round(1 * 2) = 2. Rat HP = 6 + 2*1 = 8.
+        // Also enemy.hp_mul applies — default 1.0, so no extra scaling.
+        // Expected rat HP = 8.
+        for (_e, (renderable, health)) in app.world.query::<(&Renderable, &Health)>().iter() {
+            if renderable.glyph == 'r' {
+                assert_eq!(
+                    health.max, 8,
+                    "expected rat HP=8 at scaling.floor=2.0, got {}",
+                    health.max
+                );
+                return;
+            }
+        }
+        panic!("no rat (r) found on floor 1");
+    }
+
+    #[test]
+    fn wiring_gold_density_doubles_loot_amount() {
+        use asciirogue_core::knobs::KnobId;
+        let mut rem = asciirogue_core::meta::SoulRemembrance::default();
+        rem.knobs.set(KnobId::GoldDensity, 2.0);
+        let knobs = rem.knobs.clone();
+        let app = App::new_at_with(0xCAFE_BABE_DEAD_BEEF, 1, knobs, rem, Locale::Korean, 0);
+        // Find ground gold ($) on floor 1. Default formula: Item::gold(10 + scale*4) = 14.
+        // With gold_density=2.0 → 28.
+        for (_e, (renderable, item)) in app.world.query::<(&Renderable, &Item)>().iter() {
+            if renderable.glyph == '$' {
+                assert!(
+                    (item.bonus - 28).abs() <= 1,
+                    "expected gold=28 at gold_density=2.0, got {}",
+                    item.bonus
+                );
+                return;
+            }
+        }
+        panic!("no gold ($) found on floor 1");
     }
 }

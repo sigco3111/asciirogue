@@ -3,6 +3,29 @@
 All notable changes to asciirogue are documented here. Versions follow
 [SemVer](https://semver.org/) loosely — pre-1.0 we bump on milestone.
 
+## v0.6.1 — Knob 모달리티 추가 wiring (SPEC §20)
+
+v0.6.0에서 16개 슬라이더 중 5개만 wiring되어 있던 상태에서, **5개를 더** wiring하여 총 10개가 게임에 반영됩니다.
+
+**Refactor**
+- `App::new_at_with`가 `knobs: Knobs`를 3번째 명시적 매개변수로 받음 (lib.rs + main.rs 동시). 이전에는 `remembrance.knobs`를 우회 접근했으나, 이제 constructor 시점의 knobs가 source of truth가 됨. 호출 사이트는 `let knobs = rem.knobs.clone(); App::new_at_with(seed, floor, knobs, rem, locale, gold)` 패턴.
+- R restart, r re-roll, ~warp, descend 등 6개 호출 사이트 모두 새 시그니처로 업데이트.
+- 기존 knob_tests 9개와 새 refactor 회귀 테스트 3개 (`refactor_new_at_with_explicit_knobs_param_overrides_knobs_in_remembrance`, `refactor_new_at_with_explicit_knobs_param_stored_in_remembrance`, `refactor_new_at_with_existing_callers_still_compile_after_signature_change`) 추가.
+
+**+5 wiring** (lib.rs + main.rs 동시)
+- `hp.start` — `Health::new(40 + 5*(floor-1))` 공식에 `hp_start / 100.0` 곱. 디폴트 100 → Player HP 그대로. 값 ↑ 시 HP ↑.
+- `mp.start` — `Mana::new(15 + 2*(floor-1))`에 `mp_start / 50.0` 곱. 디폴트 50 → MP 그대로.
+- `enemy.speed_mul` — `Ai::new(kind, 100, vision)`의 speed 인자에 곱. `spawn_enemy` 시그니처에 `speed_mul: f32` 추가. 보스(인라인 spawn)는 적용 안 됨 (의도적 — 보스는 자체 곡선).
+- `scaling.floor` — `populate_floor`의 `let scale = floor as i32`를 `(floor * scaling.floor).round().max(1)`로. 디폴트 1.0 → 동일. 값 ↑ 시 층당 적 HP/공격력 ↑.
+- `gold.density` — `Item::gold(10 + scale*4)`에 `gold_density` 곱. 디폴트 1.0 → 동일. 값 ↑ 시 골드 드롭 ↑.
+
+미적용 (시스템 부재로 placeholder 유지) — `food.start`, `pacing.recovery`, `relic.density`, `trap.density`. `autopilot.mode`, `autopilot.speed`는 §19 Auto-Pilot 별도 사이클 (사용자 명시 금지).
+
+**Docs**: README의 "5 wired → 11 UI only" 문단을 "10 wired → 6 UI only"로 갱신.
+**Version**: workspace.version `0.6.0` → `0.6.1`.
+
+Test totals: 130 pass / 0 fail (was 122 pass; +8 for v0.6.1).
+
 ## v0.6.0 — Knob slider system (SPEC §20)
 
 게임 룰 미세 조정을 위한 **16-knob 슬라이더 시스템**을 도입했습니다. SPEC §20 노브 시스템을 게임 중 `k`/`K` 키로 열어 슬라이더로 조정하고, 다음 런에도 자동 저장됩니다.

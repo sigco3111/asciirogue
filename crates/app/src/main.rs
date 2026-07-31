@@ -91,22 +91,30 @@ const INVENTORY_MAX: usize = 8;
 impl App {
     fn new(base_seed: u64) -> Self {
         let loc = Locale::from_code(&std::env::var("ASCIITROGUE_LANG").unwrap_or_default());
-        Self::new_at_with(base_seed, 1, load_remembrance(), loc, 0)
+        let rem = load_remembrance();
+        let knobs = rem.knobs.clone();
+        Self::new_at_with(base_seed, 1, knobs, rem, loc, 0)
     }
 
     /// Convenience for tests: a fresh App with no saved meta.
     #[allow(dead_code)]
     fn new_at(base_seed: u64, floor: u32) -> Self {
-        Self::new_at_with(base_seed, floor, SoulRemembrance::new(), Locale::Korean, 0)
+        let rem = SoulRemembrance::new();
+        let knobs = rem.knobs.clone();
+        Self::new_at_with(base_seed, floor, knobs, rem, Locale::Korean, 0)
     }
 
     fn new_at_with(
         base_seed: u64,
         floor: u32,
+        // v0.6.1: explicit knobs parameter (mirrors lib.rs).
+        knobs: asciirogue_core::knobs::Knobs,
         remembrance: SoulRemembrance,
         locale: Locale,
         carried_gold: u32,
     ) -> Self {
+        let mut remembrance = remembrance;
+        remembrance.knobs = knobs.clone();
         let theme = FloorTheme::from_depth(floor);
         // Per-floor seed: combine base + floor so each descent is deterministic.
         let seed = base_seed.wrapping_add((floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64));
@@ -135,8 +143,16 @@ impl App {
                 MAP_W,
                 MAP_H,
             ),
-            Health::new(40 + 5 * (floor as i32 - 1)),
-            Mana::new(15 + 2 * (floor as i32 - 1)),
+            {
+                let base = 40 + 5 * (floor as i32 - 1);
+                let hp_mul = (knobs.get(KnobId::HpStart) / 100.0).max(0.0);
+                Health::new(((base as f32) * hp_mul).round().max(1.0) as i32)
+            },
+            {
+                let base = 15 + 2 * (floor as i32 - 1);
+                let mp_mul = (knobs.get(KnobId::MpStart) / 50.0).max(0.0);
+                Mana::new(((base as f32) * mp_mul).round().max(1.0) as i32)
+            },
             Stats::new(10, 10, 8, 8, 10),
             Inventory::new(INVENTORY_MAX),
             Equipment::new(),
@@ -234,8 +250,9 @@ impl App {
                         }
                         KeyCode::Char('R') => {
                             let rem = self.remembrance.clone();
+                            let knobs = rem.knobs.clone();
                             let locale = self.locale;
-                            *self = App::new_at_with(self.seed, 1, rem, locale, 0);
+                            *self = App::new_at_with(self.seed, 1, knobs, rem, locale, 0);
                         }
                         _ => {}
                     }
@@ -338,8 +355,9 @@ impl App {
                     KeyCode::Char('R') => {
                         // Restart the run from floor 1.
                         let rem = self.remembrance.clone();
+                        let knobs = rem.knobs.clone();
                         let locale = self.locale;
-                        *self = App::new_at_with(self.seed, 1, rem, locale, 0);
+                        *self = App::new_at_with(self.seed, 1, knobs, rem, locale, 0);
                     }
                     KeyCode::Char('S') => {
                         // Save: persist current meta state to disk.
@@ -370,9 +388,10 @@ impl App {
                         // Re-roll current floor seed (dev cheat).
                         let new_base = self.seed.wrapping_add(0x12345);
                         let rem = self.remembrance.clone();
+                        let knobs = rem.knobs.clone();
                         let locale = self.locale;
                         let gold = self.gold;
-                        *self = App::new_at_with(new_base, self.floor, rem, locale, gold);
+                        *self = App::new_at_with(new_base, self.floor, knobs, rem, locale, gold);
                     }
                     KeyCode::Char('~') | KeyCode::Char('`') => {
                         // v0.5.14: debug stairs warp. Teleport player onto
@@ -590,10 +609,11 @@ impl App {
         let args: [&dyn std::fmt::Display; 1] = [&next_floor as &dyn std::fmt::Display];
         let msg = t_format_with_locale(I18nKey::MsgStairDescendOk, self.locale, &args);
         let rem = self.remembrance.clone();
+        let knobs = rem.knobs.clone();
         let locale = self.locale;
         let gold = self.gold;
         let seed_save = self.seed;
-        *self = App::new_at_with(seed_save, next_floor, rem, locale, gold);
+        *self = App::new_at_with(seed_save, next_floor, knobs, rem, locale, gold);
         self.log(msg);
         true
     }
@@ -1715,6 +1735,7 @@ fn spawn_enemy(
     kind: AiKind,
     hp_mul: f32,
     atk_mul: f32,
+    speed_mul: f32,
 ) {
     if let Some(room) = dungeon.rooms.get(room_idx) {
         // v0.5.12: if the room center is the stairs tile, nudge to a
@@ -1753,7 +1774,7 @@ fn spawn_enemy(
             Renderable::new(glyph, fg),
             Health::new(scaled_hp),
             stats,
-            Ai::new(kind, 100, vision),
+            Ai::new(kind, ((100.0 * speed_mul).round().max(1.0)) as i32, vision),
             Name(name.to_string()),
         ));
     }
@@ -1770,9 +1791,12 @@ fn populate_floor(
     use asciirogue_core::knobs::KnobId;
     let hp_mul = knobs.get(KnobId::EnemyHpMul);
     let atk_mul = knobs.get(KnobId::EnemyAtkMul);
+    let speed_mul = knobs.get(KnobId::EnemySpeedMul);
     let monster_density = knobs.get(KnobId::MonsterDensity);
     // Difficulty scales linearly: HP + attack bonus per floor.
-    let scale = floor as i32; // 1..=8
+    // v0.6.1: scaling.floor knob multiplies the per-floor difficulty.
+    let scaling_factor = knobs.get(KnobId::ScalingFloor);
+    let scale = (((floor as f32) * scaling_factor).round().max(1.0)) as i32; // 1..=8 (capped)
 
     // Spawn 2 standard enemies per floor (in non-boss floors) + 1 boss on BOSS_FLOOR.
     // v0.5.12: avoid placing rats/goblins/bears on the last room so the
@@ -1802,6 +1826,7 @@ fn populate_floor(
             AiKind::Coward,
             hp_mul,
             atk_mul,
+            speed_mul,
         );
         idx += 1;
         // Tier 2: a goblin (or skeleton for catacombs+).
@@ -1831,6 +1856,7 @@ fn populate_floor(
             AiKind::Chase,
             hp_mul,
             atk_mul,
+            speed_mul,
         );
     }
     // Spawn a tougher prowler if floor is mid-tier or beyond (room 3+).
@@ -1848,6 +1874,7 @@ fn populate_floor(
             AiKind::Chase,
             hp_mul,
             atk_mul,
+            speed_mul,
         );
     }
 
@@ -1912,7 +1939,11 @@ fn populate_floor(
         let cx = cx.max(room.x1 + 1).min(room.x2 - 1);
         let cy = cy.max(room.y1 + 1).min(room.y2 - 1);
         let item = match (floor + i as u32) % 4 {
-            0 => Item::gold(10 + scale * 4),
+            0 => {
+                let base = 10 + scale * 4;
+                let d = knobs.get(KnobId::GoldDensity);
+                Item::gold(((base as f32) * d).round().max(0.0) as i32)
+            }
             1 => Item::potion_hp(),
             2 => Item::potion_mp(),
             _ => Item::weapon(1 + scale, if scale >= 3 { "장검" } else { "단검" }),

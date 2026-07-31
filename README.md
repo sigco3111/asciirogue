@@ -110,15 +110,20 @@ asciirogue/
 | `R` | 전체 슬라이더 기본값으로 리셋 |
 | `Esc` / `q` / `k` / `K` | 모달 닫기 |
 
-v0.6.0에서 **5개 슬라이더**가 실제 게임 룰에 반영됩니다 (나머지 11개는 UI 표시만, v0.6.1부터 활성화):
+v0.6.1에서 **10개 슬라이더**가 실제 게임 룰에 반영됩니다 (나머지 6개는 UI 표시만, v0.6.2 이후 시스템 도입 시 연동 예정):
 
 - **`vision.range` (시야)** — 플레이어 Viewshed::new의 range에 적용
 - **`enemy.hp_mul` (적 HP)** — 적 Health::new 값에 곱
 - **`enemy.atk_mul` (적 공격)** — 적 Stats.attack_bonus 및 strength에 곱
 - **`monster.density` (적 밀도)** — 값 `0` 일 때 중간 등급 적(곰) 스폰 생략
 - **`max_floors` (최대 층)** — descend_internal 임계값을 기본 8에서 사용자가 늘릴 수 있게
+- **`hp.start` (시작 HP)** — 플레이어 시작 HP에 적용
+- **`mp.start` (시작 MP)** — 플레이어 시작 MP에 적용
+- **`enemy.speed_mul` (적 속도)** — 적 AI 속도에 적용
+- **`scaling.floor` (층 스케일링)** — 층별 적 스케일에 적용
+- **`gold.density` (골드 밀도)** — 골드 드롭량에 적용
 
-나머지 11개 (hp.start, mp.start, food.start, enemy.speed_mul, scaling.floor, autopilot.mode, autopilot.speed, pacing.recovery, relic.density, gold.density, trap.density)는 슬라이더가 표시되고 조작도 가능하지만 v0.6.0에서는 게임에 반영되지 않으며, v0.6.1에서 연동됩니다.
+나머지 6개 (`food.start`, `autopilot.mode`, `autopilot.speed`, `pacing.recovery`, `relic.density`, `trap.density`)는 슬라이더가 표시되고 조작도 가능하지만 v0.6.1에서는 게임에 반영되지 않으며, v0.6.2 이후 시스템 도입 시 연동 예정입니다.
 
 설정은 `SoulRemembrance.knobs` (RON, `#[serde(default)]`)에 자동 저장되어 다음 런에도 유지됩니다. 자세한 내용은 [`docs/SPEC.md`](docs/SPEC.md) §20 참고.
 
